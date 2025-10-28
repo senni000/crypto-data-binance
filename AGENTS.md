@@ -1,5 +1,7 @@
 # Repository Guidelines
 返信する時は日本語でやり取りをしてください。
+Rate limitに気をつけた実装をしてください。
+└Binance REST 呼び出しごとに X-MBX-USED-WEIGHT-1M を検出等
 
 ## Project Structure & Module Organization
 Source code lives in `src/`, with domain models under `src/models`, data flows and integrations in `src/services`, shared helpers in `src/utils`, and shared types in `src/types`. Service-level unit tests reside beside their targets within `src/services/__tests__`. Build artifacts compile to `dist/`; never edit generated files directly. Sample workflows or one-off scripts can sit in `collect-data/` or `simple-alert/`, but production code should stay in `src/`. Environment templates are managed through `.env.example`.

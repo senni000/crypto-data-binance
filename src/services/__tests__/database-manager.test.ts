@@ -2,7 +2,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { DatabaseManager } from '../../services/database';
-import { OHLCVData, SymbolMetadata, TopTraderAccountData, TopTraderPositionData } from '../../types';
+import { AggTrade, OHLCVData, SymbolMetadata, TopTraderAccountData, TopTraderPositionData } from '../../types';
 
 const createTempPath = (): string => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'binance-db-'));
@@ -132,5 +132,45 @@ describe('DatabaseManager', () => {
     await manager.pruneTopTraderDataBefore(now - 90_000);
     const latest = await manager.getLastTopTraderTimestamp();
     expect(latest).toBeGreaterThan(secondPosition.timestamp);
+  });
+
+  it('should persist agg trades and expose checkpoints', async () => {
+    const trades: AggTrade[] = [
+      {
+        symbol: 'ETHUSDT',
+        marketType: 'SPOT',
+        tradeId: 101,
+        price: 3000.5,
+        quantity: 0.12,
+        firstTradeId: 100,
+        lastTradeId: 101,
+        tradeTime: 1_700_000_000_001,
+        isBuyerMaker: false,
+        isBestMatch: true,
+        source: 'rest',
+      },
+      {
+        symbol: 'ETHUSDT',
+        marketType: 'SPOT',
+        tradeId: 102,
+        price: 3001.1,
+        quantity: 0.25,
+        firstTradeId: 102,
+        lastTradeId: 102,
+        tradeTime: 1_700_000_000_100,
+        isBuyerMaker: true,
+        isBestMatch: true,
+        source: 'ws',
+      },
+    ];
+
+    await manager.saveAggTrades(trades);
+    await manager.saveAggTrades([trades[1]!]); // duplicate ignored
+
+    const checkpoint = await manager.getLastAggTradeCheckpoint('ETHUSDT', 'SPOT');
+    expect(checkpoint).toEqual({
+      tradeId: 102,
+      tradeTime: trades[1]!.tradeTime,
+    });
   });
 });

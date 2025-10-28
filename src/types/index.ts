@@ -38,6 +38,22 @@ export interface OHLCVData {
   trades: number;
 }
 
+export type AggTradeSource = 'ws' | 'rest';
+
+export interface AggTrade {
+  symbol: string;
+  marketType: Extract<MarketType, 'SPOT' | 'USDT-M'>;
+  tradeId: number;
+  price: number;
+  quantity: number;
+  firstTradeId: number;
+  lastTradeId: number;
+  tradeTime: number;
+  isBuyerMaker: boolean;
+  isBestMatch: boolean;
+  source: AggTradeSource;
+}
+
 export interface TopTraderPositionData {
   symbol: string;
   timestamp: number;
@@ -81,5 +97,22 @@ export interface WebSocketKlinePayload {
       Q: string;
       B: string;
     };
+  };
+}
+
+export interface WebSocketAggTradePayload {
+  stream: string;
+  data: {
+    e: string;
+    E: number;
+    s: string;
+    a: number;
+    p: string;
+    q: string;
+    f: number;
+    l: number;
+    T: number;
+    m: boolean;
+    M: boolean;
   };
 }

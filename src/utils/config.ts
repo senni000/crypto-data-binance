@@ -10,8 +10,6 @@ import { LogLevel } from '../types/config';
 
 dotenv.config();
 
-const REQUIRED_WS_PROTOCOLS = new Set(['ws:', 'wss:']);
-
 export class ConfigManager {
   private config: AppConfig | null = null;
 
@@ -21,6 +19,13 @@ export class ConfigManager {
     );
     const databaseBackupDirectory = this.expandPath(
       this.getEnvVar('DATABASE_BACKUP_PATH', '/Volumes/buffalohd/crypto-data/backups/binance')
+    );
+
+    const aggTradeDataDirectory = this.expandPath(
+      this.getEnvVar(
+        'AGG_TRADE_DATA_DIR',
+        path.join(path.dirname(databasePath), 'agg-trades')
+      )
     );
 
     const config: AppConfig = {
@@ -33,20 +38,10 @@ export class ConfigManager {
       binanceRestBaseUrl: this.getEnvVar('BINANCE_REST_URL', 'https://api.binance.com'),
       binanceUsdMRestBaseUrl: this.getEnvVar('BINANCE_USDM_REST_URL', 'https://fapi.binance.com'),
       binanceCoinMRestBaseUrl: this.getEnvVar('BINANCE_COINM_REST_URL', 'https://dapi.binance.com'),
-      binanceWebSocketBaseUrl: this.getWebSocketUrl(
-        this.getEnvVar('BINANCE_WS_URL', 'wss://stream.binance.com:9443/ws')
-      ),
-      binanceUsdMWebSocketBaseUrl: this.getWebSocketUrl(
-        this.getEnvVar('BINANCE_USDM_WS_URL', 'wss://fstream.binance.com/ws')
-      ),
-      binanceCoinMWebSocketBaseUrl: this.getWebSocketUrl(
-        this.getEnvVar('BINANCE_COINM_WS_URL', 'wss://dstream.binance.com/ws')
-      ),
       rateLimitBuffer: this.getNumberEnvVar('RATE_LIMIT_BUFFER', 0.1),
       restRequestTimeout: this.getNumberEnvVar('REST_REQUEST_TIMEOUT_MS', 10_000),
-      wsReconnectInterval: this.getNumberEnvVar('WS_RECONNECT_INTERVAL_MS', 5_000),
-      wsMaxSymbolsPerStream: this.getNumberEnvVar('WS_MAX_SYMBOLS_PER_STREAM', 300),
       symbolUpdateHourUtc: this.getNumberEnvVar('SYMBOL_UPDATE_HOUR_UTC', 1),
+      aggTradeDataDirectory,
     };
 
     this.validateConfig(config);
@@ -71,12 +66,12 @@ export class ConfigManager {
       errors.push('DATABASE_BACKUP_PATH is required when DATABASE_BACKUP_ENABLED=true');
     }
 
-    if (config.rateLimitBuffer < 0 || config.rateLimitBuffer >= 1) {
-      errors.push('RATE_LIMIT_BUFFER must be between 0 (inclusive) and 1 (exclusive)');
+    if (!config.aggTradeDataDirectory) {
+      errors.push('AGG_TRADE_DATA_DIR must not be empty');
     }
 
-    if (config.wsMaxSymbolsPerStream <= 0) {
-      errors.push('WS_MAX_SYMBOLS_PER_STREAM must be positive');
+    if (config.rateLimitBuffer < 0 || config.rateLimitBuffer >= 1) {
+      errors.push('RATE_LIMIT_BUFFER must be between 0 (inclusive) and 1 (exclusive)');
     }
 
     if (config.symbolUpdateHourUtc < 0 || config.symbolUpdateHourUtc > 23) {
@@ -137,18 +132,6 @@ export class ConfigManager {
     }
     console.warn(`Invalid LOG_LEVEL ${value}. Falling back to info.`);
     return 'info';
-  }
-
-  private getWebSocketUrl(value: string): string {
-    try {
-      const url = new URL(value);
-      if (!REQUIRED_WS_PROTOCOLS.has(url.protocol)) {
-        throw new Error(`Expected ws:// or wss:// but got ${url.protocol}`);
-      }
-      return value;
-    } catch (error) {
-      throw new Error(`Invalid BINANCE_WS_URL: ${(error as Error).message}`);
-    }
   }
 
   private expandPath(filePath: string): string {

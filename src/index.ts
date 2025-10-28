@@ -1,3 +1,4 @@
+import path from 'path';
 import './utils/setup-logging';
 import { initializeConfig, getConfig } from './utils/config';
 import { logger } from './utils/logger';
@@ -5,9 +6,10 @@ import {
   DatabaseManager,
   SymbolManager,
   BinanceRestClient,
-  BinanceWebSocketManager,
+  AggTradeDatabaseManager,
   RateLimiter,
   DataCollector,
+  AggTradeCollector,
   DatabaseBackupScheduler,
 } from './services';
 
@@ -36,27 +38,31 @@ async function bootstrap(): Promise<void> {
     timeout: config.restRequestTimeout,
   });
 
-  const wsManager = new BinanceWebSocketManager({
-    spotWsUrl: config.binanceWebSocketBaseUrl,
-    usdMWsUrl: config.binanceUsdMWebSocketBaseUrl,
-    coinMWsUrl: config.binanceCoinMWebSocketBaseUrl,
-    reconnectIntervalMs: config.wsReconnectInterval,
-    maxSymbolsPerStream: config.wsMaxSymbolsPerStream,
-  });
+  const aggTradeDatabaseManager = new AggTradeDatabaseManager(config.aggTradeDataDirectory);
 
   const dataCollector = new DataCollector(
     databaseManager,
     symbolManager,
     restClient,
-    wsManager,
     {
-      restIntervals: {
-        '30m': 30 * 60 * 1000,
-        '1d': 24 * 60 * 60 * 1000,
-      },
       topTraderIntervalMs: 5 * 60 * 1000,
-      bufferFlushIntervalMs: 5_000,
-      maxBufferSize: 1_000,
+      topTraderRequestDelayMs: 3_000,
+      topTraderMaxRetries: 3,
+      topTraderRetryDelayMs: 5_000,
+    }
+  );
+
+  const aggTradeCollector = new AggTradeCollector(
+    aggTradeDatabaseManager,
+    symbolManager,
+    restClient,
+    {
+      assetListPath: path.resolve(process.cwd(), 'coinmarketcap_top100.csv'),
+      fetchIntervalMs: 60 * 60 * 1000,
+      restLimit: 1_000,
+      initialLookbackMs: 12 * 60 * 60 * 1000,
+      maxRetries: 3,
+      retryDelayMs: 5_000,
     }
   );
 
@@ -72,9 +78,10 @@ async function bootstrap(): Promise<void> {
     ? new DatabaseBackupScheduler(backupOptions)
     : null;
 
-  setupProcessHandlers(dataCollector, backupScheduler);
+  setupProcessHandlers(dataCollector, aggTradeCollector, backupScheduler);
 
   await dataCollector.start();
+  await aggTradeCollector.start();
   if (backupScheduler) {
     backupScheduler.start();
   }
@@ -92,12 +99,15 @@ function registerRateLimiters(rateLimiter: RateLimiter, buffer: number): void {
   rateLimiter.registerEndpoint('klines:SPOT', applyBuffer(1_200), minute);
   rateLimiter.registerEndpoint('klines:USDT-M', applyBuffer(1_200), minute);
   rateLimiter.registerEndpoint('klines:COIN-M', applyBuffer(1_200), minute);
+  rateLimiter.registerEndpoint('aggTrades:SPOT', applyBuffer(1_200), minute);
+  rateLimiter.registerEndpoint('aggTrades:USDT-M', applyBuffer(1_200), minute);
   rateLimiter.registerEndpoint('topTrader:positions', applyBuffer(1_200), minute);
   rateLimiter.registerEndpoint('topTrader:accounts', applyBuffer(1_200), minute);
 }
 
 function setupProcessHandlers(
   dataCollector: DataCollector,
+  aggTradeCollector: AggTradeCollector,
   backupScheduler: DatabaseBackupScheduler | null
 ): void {
   const shutdown = async (signal: NodeJS.Signals) => {
@@ -105,6 +115,7 @@ function setupProcessHandlers(
     if (backupScheduler) {
       backupScheduler.stop();
     }
+    await aggTradeCollector.stop();
     await dataCollector.stop();
     process.exit(0);
   };

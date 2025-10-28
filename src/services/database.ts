@@ -12,6 +12,7 @@ import {
   MarketType,
   OHLCVData,
   OHLCVTimeframe,
+  AggTrade,
   SymbolMetadata,
   TopTraderAccountData,
   TopTraderPositionData,
@@ -119,6 +120,28 @@ const MIGRATIONS: Migration[] = [
       `CREATE INDEX IF NOT EXISTS idx_ohlcv_1d_open_time ON ohlcv_1d(open_time)`,
       `CREATE INDEX IF NOT EXISTS idx_top_trader_positions_timestamp ON top_trader_positions(timestamp)`,
       `CREATE INDEX IF NOT EXISTS idx_top_trader_accounts_timestamp ON top_trader_accounts(timestamp)`
+    ],
+  },
+  {
+    id: 2,
+    name: 'create_agg_trades_table',
+    statements: [
+      `CREATE TABLE IF NOT EXISTS agg_trades (
+        symbol TEXT NOT NULL,
+        market_type TEXT NOT NULL,
+        trade_id INTEGER NOT NULL,
+        price REAL NOT NULL,
+        quantity REAL NOT NULL,
+        first_trade_id INTEGER NOT NULL,
+        last_trade_id INTEGER NOT NULL,
+        trade_time INTEGER NOT NULL,
+        is_buyer_maker INTEGER NOT NULL,
+        is_best_match INTEGER NOT NULL,
+        source TEXT NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (symbol, market_type, trade_id)
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_agg_trades_time ON agg_trades(symbol, market_type, trade_time)`
     ],
   },
 ];
@@ -279,6 +302,38 @@ export class DatabaseManager implements IDatabaseManager {
     });
   }
 
+  async saveAggTrades(trades: AggTrade[]): Promise<void> {
+    if (trades.length === 0) {
+      return;
+    }
+
+    const sql = `
+      INSERT OR IGNORE INTO agg_trades (
+        symbol, market_type, trade_id, price, quantity,
+        first_trade_id, last_trade_id, trade_time,
+        is_buyer_maker, is_best_match, source
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `;
+
+    await this.withTransaction(async (db) => {
+      for (const trade of trades) {
+        await this.runSql(db, sql, [
+          trade.symbol,
+          trade.marketType,
+          trade.tradeId,
+          trade.price,
+          trade.quantity,
+          trade.firstTradeId,
+          trade.lastTradeId,
+          trade.tradeTime,
+          trade.isBuyerMaker ? 1 : 0,
+          trade.isBestMatch ? 1 : 0,
+          trade.source,
+        ]);
+      }
+    });
+  }
+
   async saveTopTraderPositions(data: TopTraderPositionData[]): Promise<void> {
     if (data.length === 0) {
       return;
@@ -350,6 +405,30 @@ export class DatabaseManager implements IDatabaseManager {
       result[row.symbol] = row.open_time ?? undefined;
     }
     return result;
+  }
+
+  async getLastAggTradeCheckpoint(
+    symbol: string,
+    marketType: AggTrade['marketType']
+  ): Promise<{ tradeId: number; tradeTime: number } | undefined> {
+    const row = await this.get<{
+      trade_id: number;
+      trade_time: number;
+    }>(
+      `SELECT trade_id, trade_time
+       FROM agg_trades
+       WHERE symbol = ? AND market_type = ?
+       ORDER BY trade_id DESC
+       LIMIT 1`,
+      [symbol, marketType]
+    );
+    if (!row) {
+      return undefined;
+    }
+    return {
+      tradeId: Number(row.trade_id),
+      tradeTime: Number(row.trade_time),
+    };
   }
 
   async getLastTopTraderTimestamp(): Promise<number | undefined> {

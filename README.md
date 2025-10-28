@@ -61,15 +61,12 @@ src/
    - `DATABASE_BACKUP_ENABLED`: バックアップスケジューラを有効化するか (`true` / 無効化する場合は `false`)。
    - `DATABASE_BACKUP_SINGLE_FILE`: `true` にするとタイムスタンプ付きスナップショットではなく単一ファイルに上書き保存。
    - `DATABASE_BACKUP_PATH`: バックアップディレクトリ (`/Volumes/buffalohd/crypto-data/backups/binance`)。
-   - `DATABASE_BACKUP_INTERVAL_MS`: バックアップの実行間隔ミリ秒 (`86400000`)。
-   - `BINANCE_REST_URL` / `BINANCE_USDM_REST_URL` / `BINANCE_COINM_REST_URL`: REST API ベース URL。
-   - `BINANCE_WS_URL` / `BINANCE_USDM_WS_URL` / `BINANCE_COINM_WS_URL`: WebSocket ベース URL。
-   - `RATE_LIMIT_BUFFER`: レートリミットキャパシティに掛ける安全係数 (`0.1`)。
-   - `REST_REQUEST_TIMEOUT_MS`: REST リクエストのタイムアウト (`10000`)。
-   - `WS_RECONNECT_INTERVAL_MS`: WebSocket 再接続までの基準間隔 (`5000`)。
-   - `WS_MAX_SYMBOLS_PER_STREAM`: WebSocket 1 接続あたりのシンボル上限 (`300`)。
-   - `SYMBOL_UPDATE_HOUR_UTC`: シンボル同期の実行時刻 (UTC, `1`)。
-   - `LOG_LEVEL`: `error` / `warn` / `info` / `debug` (`info`)。
+  - `DATABASE_BACKUP_INTERVAL_MS`: バックアップの実行間隔ミリ秒 (`86400000`)。
+  - `BINANCE_REST_URL` / `BINANCE_USDM_REST_URL` / `BINANCE_COINM_REST_URL`: REST API ベース URL。
+  - `RATE_LIMIT_BUFFER`: レートリミットキャパシティに掛ける安全係数 (`0.1`)。
+  - `REST_REQUEST_TIMEOUT_MS`: REST リクエストのタイムアウト (`10000`)。
+  - `SYMBOL_UPDATE_HOUR_UTC`: シンボル同期の実行時刻 (UTC, `1`)。
+  - `LOG_LEVEL`: `error` / `warn` / `info` / `debug` (`info`)。
 
 3. ビルド & 実行
 
@@ -92,10 +89,9 @@ src/
 
 1. 起動時に `.env` を読み込み、`RateLimiter` にエンドポイント別のキャパシティを登録。
 2. `SymbolManager.updateSymbols()` で SPOT / USDT-M / COIN-M のシンボルを取得し、SQLite にアップサート。
-3. `BinanceWebSocketManager` が 1 分足ストリームを購読し、バッファを介して 5 秒ごとに `ohlcv_1m` へバルク挿入。
-4. REST スケジューラが 30 分足・日足を定期取得し、未取得期間だけを追加入力。
-5. Top Trader 指標を 5 分ごとに取得し、ポジションとアカウント比率テーブルを更新。
-6. バックアップスケジューラが日次で SQLite をコピーし、保持ポリシーに沿ってバックアップを整理。併せて 7 日より古い OHLCV/Top Trader データをプライマリ DB から間引き。`DATABASE_BACKUP_ENABLED=false` の場合は本処理をスキップ。
+3. `AggTradeCollector` が主要ペアを毎時 REST API で取得し、ティックデータを SQLite に蓄積 (初回のみ過去 12 時間分をバックフィル)。
+4. Top Trader 指標を 5 分ごとに取得し、リトライとディレイを挟みつつポジション/アカウント比率テーブルを更新。
+5. バックアップスケジューラが日次で SQLite をコピーし、保持ポリシーに沿ってバックアップを整理。併せて 7 日より古い OHLCV / Top Trader データをプライマリ DB から間引き。`DATABASE_BACKUP_ENABLED=false` の場合は本処理をスキップ。
 
 ## ライセンス
 
