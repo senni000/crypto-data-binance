@@ -1,7 +1,7 @@
 module.exports = {
   apps: [
     {
-      name: 'crypto-data-alert',
+      name: 'crypto-binance-data-alert',
       script: './dist/index.js',
       instances: 1,
       autorestart: true,

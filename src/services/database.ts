@@ -1,376 +1,460 @@
 /**
- * Database Manager Implementation
- * Handles SQLite database operations for the Crypto Data Alert System
+ * SQLiteデータベース管理
+ * - スキーマ初期化とマイグレーション
+ * - トランザクションベースのバルク書き込み
+ * - OHLCV / Top Trader / Symbol メタデータの永続化
  */
 
-import sqlite3 from 'sqlite3';
-import path from 'path';
 import fs from 'fs';
-import { TradeData, OptionData, CVDData, AlertHistory } from '../types';
+import path from 'path';
+import sqlite3 from 'sqlite3';
+import {
+  MarketType,
+  OHLCVData,
+  OHLCVTimeframe,
+  SymbolMetadata,
+  TopTraderAccountData,
+  TopTraderPositionData,
+} from '../types';
 import { IDatabaseManager } from './interfaces';
+
+sqlite3.verbose();
+
+interface Migration {
+  id: number;
+  name: string;
+  statements: string[];
+}
+
+const MIGRATIONS: Migration[] = [
+  {
+    id: 1,
+    name: 'create_base_tables',
+    statements: [
+      `CREATE TABLE IF NOT EXISTS schema_migrations (
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL,
+        applied_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )`,
+      `CREATE TABLE IF NOT EXISTS symbols (
+        symbol TEXT NOT NULL,
+        base_asset TEXT NOT NULL,
+        quote_asset TEXT NOT NULL,
+        market_type TEXT NOT NULL,
+        status TEXT NOT NULL,
+        onboard_date INTEGER NOT NULL,
+        contract_type TEXT,
+        delivery_date INTEGER,
+        tick_size REAL,
+        step_size REAL,
+        min_notional REAL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (symbol, market_type)
+      )`,
+      `CREATE TABLE IF NOT EXISTS ohlcv_1m (
+        symbol TEXT NOT NULL,
+        open_time INTEGER NOT NULL,
+        close_time INTEGER NOT NULL,
+        open REAL NOT NULL,
+        high REAL NOT NULL,
+        low REAL NOT NULL,
+        close REAL NOT NULL,
+        volume REAL NOT NULL,
+        quote_volume REAL NOT NULL,
+        trades INTEGER NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (symbol, open_time)
+      )`,
+      `CREATE TABLE IF NOT EXISTS ohlcv_30m (
+        symbol TEXT NOT NULL,
+        open_time INTEGER NOT NULL,
+        close_time INTEGER NOT NULL,
+        open REAL NOT NULL,
+        high REAL NOT NULL,
+        low REAL NOT NULL,
+        close REAL NOT NULL,
+        volume REAL NOT NULL,
+        quote_volume REAL NOT NULL,
+        trades INTEGER NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (symbol, open_time)
+      )`,
+      `CREATE TABLE IF NOT EXISTS ohlcv_1d (
+        symbol TEXT NOT NULL,
+        open_time INTEGER NOT NULL,
+        close_time INTEGER NOT NULL,
+        open REAL NOT NULL,
+        high REAL NOT NULL,
+        low REAL NOT NULL,
+        close REAL NOT NULL,
+        volume REAL NOT NULL,
+        quote_volume REAL NOT NULL,
+        trades INTEGER NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (symbol, open_time)
+      )`,
+      `CREATE TABLE IF NOT EXISTS top_trader_positions (
+        symbol TEXT NOT NULL,
+        timestamp INTEGER NOT NULL,
+        long_short_ratio REAL NOT NULL,
+        long_account REAL NOT NULL,
+        short_account REAL NOT NULL,
+        long_position REAL NOT NULL,
+        short_position REAL NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (symbol, timestamp)
+      )`,
+      `CREATE TABLE IF NOT EXISTS top_trader_accounts (
+        symbol TEXT NOT NULL,
+        timestamp INTEGER NOT NULL,
+        long_short_ratio REAL NOT NULL,
+        long_account REAL NOT NULL,
+        short_account REAL NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (symbol, timestamp)
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_symbols_market_status ON symbols(market_type, status)`,
+      `CREATE INDEX IF NOT EXISTS idx_ohlcv_1m_open_time ON ohlcv_1m(open_time)`,
+      `CREATE INDEX IF NOT EXISTS idx_ohlcv_30m_open_time ON ohlcv_30m(open_time)`,
+      `CREATE INDEX IF NOT EXISTS idx_ohlcv_1d_open_time ON ohlcv_1d(open_time)`,
+      `CREATE INDEX IF NOT EXISTS idx_top_trader_positions_timestamp ON top_trader_positions(timestamp)`,
+      `CREATE INDEX IF NOT EXISTS idx_top_trader_accounts_timestamp ON top_trader_accounts(timestamp)`
+    ],
+  },
+];
 
 export class DatabaseManager implements IDatabaseManager {
   private db: sqlite3.Database | null = null;
-  private dbPath: string;
+  private transactionChain: Promise<void> = Promise.resolve();
 
-  constructor(databasePath: string) {
-    this.dbPath = databasePath;
+  constructor(private readonly databasePath: string) {}
+
+  async initialize(): Promise<void> {
+    await this.ensureDirectory();
+    await this.openDatabase();
+    await this.configureDatabase();
   }
 
-  /**
-   * Initialize database connection and create schema
-   */
-  async initializeDatabase(): Promise<void> {
-    return new Promise((resolve, reject) => {
-      try {
-        // Ensure directory exists
-        const dbDir = path.dirname(this.dbPath);
-        if (!fs.existsSync(dbDir)) {
-          fs.mkdirSync(dbDir, { recursive: true });
+  async runMigrations(): Promise<void> {
+    const db = this.getDb();
+    await this.exec('BEGIN');
+    try {
+      await this.exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL,
+        applied_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )`);
+      const appliedMigrations = await this.getAppliedMigrations();
+      for (const migration of MIGRATIONS) {
+        if (appliedMigrations.has(migration.id)) {
+          continue;
         }
+        for (const statement of migration.statements) {
+          await this.run(statement);
+        }
+        await this.run(
+          'INSERT INTO schema_migrations (id, name) VALUES (?, ?)',
+          migration.id,
+          migration.name
+        );
+      }
+      await this.exec('COMMIT');
+    } catch (error) {
+      await this.exec('ROLLBACK');
+      throw error;
+    } finally {
+      db.serialize();
+    }
+  }
 
-        // Create database connection
-        this.db = new sqlite3.Database(this.dbPath, (err) => {
-          if (err) {
-            console.error('Failed to connect to database:', err);
-            reject(err);
-            return;
-          }
+  async upsertSymbols(symbols: SymbolMetadata[]): Promise<void> {
+    if (symbols.length === 0) {
+      return;
+    }
 
-          // Create tables and indexes
-          this.createTables()
-            .then(() => this.createIndexes())
-            .then(() => {
-              console.log('Database initialized successfully');
-              resolve();
-            })
-            .catch(reject);
-        });
-      } catch (error) {
-        console.error('Failed to initialize database:', error);
-        reject(error);
+    const sql = `
+      INSERT INTO symbols (
+        symbol, base_asset, quote_asset, market_type, status,
+        onboard_date, contract_type, delivery_date,
+        tick_size, step_size, min_notional, updated_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(symbol, market_type) DO UPDATE SET
+        base_asset=excluded.base_asset,
+        quote_asset=excluded.quote_asset,
+        market_type=excluded.market_type,
+        status=excluded.status,
+        onboard_date=excluded.onboard_date,
+        contract_type=excluded.contract_type,
+        delivery_date=excluded.delivery_date,
+        tick_size=excluded.tick_size,
+        step_size=excluded.step_size,
+        min_notional=excluded.min_notional,
+        updated_at=excluded.updated_at
+    `;
+
+    await this.withTransaction(async (db) => {
+      for (const symbol of symbols) {
+        await this.runSql(db, sql, [
+          symbol.symbol,
+          symbol.baseAsset,
+          symbol.quoteAsset,
+          symbol.marketType,
+          symbol.status,
+          symbol.onboardDate,
+          symbol.contractType ?? null,
+          symbol.deliveryDate ?? null,
+          symbol.filters.tickSize ?? null,
+          symbol.filters.stepSize ?? null,
+          symbol.filters.minNotional ?? null,
+          symbol.updatedAt,
+        ]);
       }
     });
   }
 
-  /**
-   * Create database tables
-   */
-  private async createTables(): Promise<void> {
-    const db = this.getDatabase();
+  async listActiveSymbols(marketType?: MarketType): Promise<SymbolMetadata[]> {
+    const sql = marketType
+      ? `SELECT * FROM symbols WHERE status = 'ACTIVE' AND market_type = ?`
+      : `SELECT * FROM symbols WHERE status = 'ACTIVE'`;
+    const params = marketType ? [marketType] : [];
+    const rows = await this.all(sql, params);
+    return rows.map(this.mapSymbolRow);
+  }
 
-    const tables = [
-      `CREATE TABLE IF NOT EXISTS trade_data (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        symbol TEXT NOT NULL,
-        timestamp INTEGER NOT NULL,
-        price REAL NOT NULL,
-        amount REAL NOT NULL,
-        direction TEXT NOT NULL,
-        trade_id TEXT UNIQUE NOT NULL,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-      )`,
-      `CREATE TABLE IF NOT EXISTS option_data (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        symbol TEXT NOT NULL,
-        timestamp INTEGER NOT NULL,
-        underlying_price REAL NOT NULL,
-        mark_price REAL NOT NULL,
-        implied_volatility REAL NOT NULL,
-        delta REAL NOT NULL,
-        gamma REAL NOT NULL,
-        theta REAL NOT NULL,
-        vega REAL NOT NULL,
-        rho REAL NOT NULL,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-      )`,
-      `CREATE TABLE IF NOT EXISTS cvd_data (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        timestamp INTEGER NOT NULL,
-        cvd_value REAL NOT NULL,
-        z_score REAL NOT NULL,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-      )`,
-      `CREATE TABLE IF NOT EXISTS alert_history (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        alert_type TEXT NOT NULL,
-        timestamp INTEGER NOT NULL,
-        value REAL NOT NULL,
-        threshold REAL NOT NULL,
-        message TEXT NOT NULL,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-      )`
-    ];
+  async listAllSymbols(): Promise<SymbolMetadata[]> {
+    const rows = await this.all('SELECT * FROM symbols');
+    return rows.map(this.mapSymbolRow);
+  }
 
-    return new Promise((resolve, reject) => {
-      let completed = 0;
-      
-      for (const tableSql of tables) {
-        db.run(tableSql, (err) => {
-          if (err) {
-            reject(err);
-            return;
-          }
-          
-          completed++;
-          if (completed === tables.length) {
-            resolve();
-          }
-        });
+  async markSymbolsInactive(entries: Array<{ symbol: string; marketType: MarketType }>): Promise<void> {
+    if (entries.length === 0) {
+      return;
+    }
+
+    await this.withTransaction(async (db) => {
+      const sql = `UPDATE symbols SET status = 'INACTIVE', updated_at = ? WHERE symbol = ? AND market_type = ?`;
+      for (const entry of entries) {
+        await this.runSql(db, sql, [Date.now(), entry.symbol, entry.marketType]);
       }
     });
   }
 
-  /**
-   * Create database indexes for performance optimization
-   */
-  private async createIndexes(): Promise<void> {
-    const db = this.getDatabase();
+  async saveOHLCVBatch(data: OHLCVData[]): Promise<void> {
+    if (data.length === 0) {
+      return;
+    }
 
-    const indexes = [
-      'CREATE INDEX IF NOT EXISTS idx_trade_data_timestamp ON trade_data(timestamp)',
-      'CREATE INDEX IF NOT EXISTS idx_trade_data_symbol ON trade_data(symbol)',
-      'CREATE INDEX IF NOT EXISTS idx_option_data_timestamp ON option_data(timestamp)',
-      'CREATE INDEX IF NOT EXISTS idx_option_data_symbol ON option_data(symbol)',
-      'CREATE INDEX IF NOT EXISTS idx_cvd_data_timestamp ON cvd_data(timestamp)',
-      'CREATE INDEX IF NOT EXISTS idx_alert_history_timestamp ON alert_history(timestamp)',
-      'CREATE INDEX IF NOT EXISTS idx_alert_history_type ON alert_history(alert_type)'
-    ];
+    const grouped = new Map<OHLCVTimeframe, OHLCVData[]>();
+    for (const item of data) {
+      const list = grouped.get(item.interval) ?? [];
+      list.push(item);
+      grouped.set(item.interval, list);
+    }
 
-    return new Promise((resolve, reject) => {
-      let completed = 0;
-      
-      for (const indexSql of indexes) {
-        db.run(indexSql, (err) => {
-          if (err) {
-            reject(err);
-            return;
-          }
-          
-          completed++;
-          if (completed === indexes.length) {
-            resolve();
-          }
-        });
+    await this.withTransaction(async (db) => {
+      for (const [interval, items] of grouped.entries()) {
+        const table = this.getOhlcvTable(interval);
+        const sql = `
+          INSERT OR IGNORE INTO ${table} (
+            symbol, open_time, close_time, open, high, low, close,
+            volume, quote_volume, trades
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `;
+        for (const item of items) {
+          await this.runSql(db, sql, [
+            item.symbol,
+            item.openTime,
+            item.closeTime,
+            item.open,
+            item.high,
+            item.low,
+            item.close,
+            item.volume,
+            item.quoteVolume,
+            item.trades,
+          ]);
+        }
       }
     });
   }
 
-  /**
-   * Get database connection (throws error if not initialized)
-   */
-  private getDatabase(): sqlite3.Database {
+  async saveTopTraderPositions(data: TopTraderPositionData[]): Promise<void> {
+    if (data.length === 0) {
+      return;
+    }
+
+    const sql = `
+      INSERT OR REPLACE INTO top_trader_positions (
+        symbol, timestamp, long_short_ratio, long_account,
+        short_account, long_position, short_position
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    `;
+
+    await this.withTransaction(async (db) => {
+      for (const item of data) {
+        await this.runSql(db, sql, [
+          item.symbol,
+          item.timestamp,
+          item.longShortRatio,
+          item.longAccount,
+          item.shortAccount,
+          item.longPosition,
+          item.shortPosition,
+        ]);
+      }
+    });
+  }
+
+  async saveTopTraderAccounts(data: TopTraderAccountData[]): Promise<void> {
+    if (data.length === 0) {
+      return;
+    }
+
+    const sql = `
+      INSERT OR REPLACE INTO top_trader_accounts (
+        symbol, timestamp, long_short_ratio, long_account, short_account
+      ) VALUES (?, ?, ?, ?, ?)
+    `;
+
+    await this.withTransaction(async (db) => {
+      for (const item of data) {
+        await this.runSql(db, sql, [
+          item.symbol,
+          item.timestamp,
+          item.longShortRatio,
+          item.longAccount,
+          item.shortAccount,
+        ]);
+      }
+    });
+  }
+
+  async pruneDataBefore(interval: OHLCVTimeframe, cutoff: number): Promise<void> {
+    const table = this.getOhlcvTable(interval);
+    await this.run(`DELETE FROM ${table} WHERE open_time < ?`, cutoff);
+  }
+
+  async pruneTopTraderDataBefore(cutoff: number): Promise<void> {
+    await this.run('DELETE FROM top_trader_positions WHERE timestamp < ?', cutoff);
+    await this.run('DELETE FROM top_trader_accounts WHERE timestamp < ?', cutoff);
+  }
+
+  async getLastOHLCVTimestamps(interval: OHLCVTimeframe): Promise<Record<string, number | undefined>> {
+    const table = this.getOhlcvTable(interval);
+    const rows = await this.all(
+      `SELECT symbol, MAX(open_time) as open_time FROM ${table} GROUP BY symbol`
+    );
+    const result: Record<string, number | undefined> = {};
+    for (const row of rows) {
+      result[row.symbol] = row.open_time ?? undefined;
+    }
+    return result;
+  }
+
+  async getLastTopTraderTimestamp(): Promise<number | undefined> {
+    const row = await this.get<{ timestamp: number }>(
+      `SELECT MAX(timestamp) as timestamp FROM top_trader_positions`
+    );
+    return row?.timestamp ?? undefined;
+  }
+
+  private getOhlcvTable(interval: OHLCVTimeframe): string {
+    switch (interval) {
+      case '1m':
+        return 'ohlcv_1m';
+      case '30m':
+        return 'ohlcv_30m';
+      case '1d':
+        return 'ohlcv_1d';
+      default:
+        throw new Error(`Unsupported interval: ${interval}`);
+    }
+  }
+
+  private mapSymbolRow(row: any): SymbolMetadata {
+    return {
+      symbol: row.symbol,
+      baseAsset: row.base_asset,
+      quoteAsset: row.quote_asset,
+      marketType: row.market_type as MarketType,
+      status: row.status,
+      onboardDate: Number(row.onboard_date),
+      contractType: row.contract_type ?? undefined,
+      deliveryDate: row.delivery_date ?? undefined,
+      filters: {
+        tickSize: row.tick_size ?? undefined,
+        stepSize: row.step_size ?? undefined,
+        minNotional: row.min_notional ?? undefined,
+      },
+      updatedAt: Number(row.updated_at),
+    };
+  }
+
+  private async ensureDirectory(): Promise<void> {
+    const dir = path.dirname(this.databasePath);
+    await fs.promises.mkdir(dir, { recursive: true });
+  }
+
+  private async openDatabase(): Promise<void> {
+    if (this.db) {
+      return;
+    }
+    this.db = await new Promise<sqlite3.Database>((resolve, reject) => {
+      const db = new sqlite3.Database(this.databasePath, (error) => {
+        if (error) {
+          reject(error);
+        } else {
+          resolve(db);
+        }
+      });
+    });
+  }
+
+  private async configureDatabase(): Promise<void> {
+    await this.exec('PRAGMA journal_mode = WAL');
+    await this.exec('PRAGMA busy_timeout = 5000');
+    await this.exec('PRAGMA synchronous = NORMAL');
+  }
+
+  private getDb(): sqlite3.Database {
     if (!this.db) {
-      throw new Error('Database not initialized. Call initializeDatabase() first.');
+      throw new Error('Database connection is not initialized');
     }
     return this.db;
   }
 
-  /**
-   * Save trade data to database
-   */
-  async saveTradeData(data: TradeData[]): Promise<void> {
-    const db = this.getDatabase();
-
-    const insertSql = `
-      INSERT OR IGNORE INTO trade_data 
-      (symbol, timestamp, price, amount, direction, trade_id)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `;
-
-    return new Promise((resolve, reject) => {
-      db.serialize(() => {
-        db.run('BEGIN TRANSACTION');
-        
-        let completed = 0;
-        let hasError = false;
-        
-        if (data.length === 0) {
-          db.run('COMMIT');
-          resolve();
-          return;
-        }
-        
-        for (const trade of data) {
-          db.run(insertSql, [
-            trade.symbol,
-            trade.timestamp,
-            trade.price,
-            trade.amount,
-            trade.direction,
-            trade.tradeId
-          ], (err) => {
-            if (err && !hasError) {
-              hasError = true;
-              db.run('ROLLBACK');
-              console.error('Failed to save trade data:', err);
-              reject(err);
-              return;
-            }
-            
-            completed++;
-            if (completed === data.length && !hasError) {
-              db.run('COMMIT', (commitErr) => {
-                if (commitErr) {
-                  console.error('Failed to commit trade data:', commitErr);
-                  reject(commitErr);
-                } else {
-                  resolve();
-                }
-              });
-            }
-          });
-        }
-      });
-    });
+  private async getAppliedMigrations(): Promise<Set<number>> {
+    const rows = await this.all<{ id: number }>('SELECT id FROM schema_migrations');
+    return new Set(rows.map((row) => row.id));
   }
 
-  /**
-   * Save option data to database
-   */
-  async saveOptionData(data: OptionData[]): Promise<void> {
-    const db = this.getDatabase();
+  private withTransaction<T>(fn: (db: sqlite3.Database) => Promise<T>): Promise<T> {
+    const run = async (): Promise<T> => {
+      const db = this.getDb();
+      await this.exec('BEGIN IMMEDIATE TRANSACTION');
+      try {
+        const result = await fn(db);
+        await this.exec('COMMIT');
+        return result;
+      } catch (error) {
+        await this.exec('ROLLBACK');
+        throw error;
+      }
+    };
 
-    const insertSql = `
-      INSERT INTO option_data 
-      (symbol, timestamp, underlying_price, mark_price, implied_volatility, 
-       delta, gamma, theta, vega, rho)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `;
-
-    return new Promise((resolve, reject) => {
-      db.serialize(() => {
-        db.run('BEGIN TRANSACTION');
-        
-        let completed = 0;
-        let hasError = false;
-        
-        if (data.length === 0) {
-          db.run('COMMIT');
-          resolve();
-          return;
-        }
-        
-        for (const option of data) {
-          db.run(insertSql, [
-            option.symbol,
-            option.timestamp,
-            option.underlyingPrice,
-            option.markPrice,
-            option.impliedVolatility,
-            option.delta,
-            option.gamma,
-            option.theta,
-            option.vega,
-            option.rho
-          ], (err) => {
-            if (err && !hasError) {
-              hasError = true;
-              db.run('ROLLBACK');
-              console.error('Failed to save option data:', err);
-              reject(err);
-              return;
-            }
-            
-            completed++;
-            if (completed === data.length && !hasError) {
-              db.run('COMMIT', (commitErr) => {
-                if (commitErr) {
-                  console.error('Failed to commit option data:', commitErr);
-                  reject(commitErr);
-                } else {
-                  resolve();
-                }
-              });
-            }
-          });
-        }
-      });
-    });
+    const resultPromise = this.transactionChain.then(run);
+    this.transactionChain = resultPromise.then(
+      () => undefined,
+      () => undefined
+    );
+    return resultPromise;
   }
 
-  /**
-   * Get trade data from the last 24 hours
-   */
-  async getTradeDataLast24Hours(): Promise<TradeData[]> {
-    const db = this.getDatabase();
-    const twentyFourHoursAgo = Date.now() - (24 * 60 * 60 * 1000);
-    
-    const selectSql = `
-      SELECT symbol, timestamp, price, amount, direction, trade_id as tradeId
-      FROM trade_data 
-      WHERE timestamp >= ?
-      ORDER BY timestamp ASC
-    `;
-
+  private runSql(db: sqlite3.Database, sql: string, params: unknown[]): Promise<void> {
     return new Promise((resolve, reject) => {
-      db.all(selectSql, [twentyFourHoursAgo], (err, rows) => {
+      db.run(sql, params, (err) => {
         if (err) {
-          console.error('Failed to get trade data:', err);
-          reject(err);
-        } else {
-          resolve(rows as TradeData[]);
-        }
-      });
-    });
-  }
-
-  /**
-   * Get the latest option data
-   */
-  async getLatestOptionData(): Promise<OptionData[]> {
-    const db = this.getDatabase();
-
-    const selectSql = `
-      SELECT 
-        symbol, 
-        timestamp, 
-        underlying_price as underlyingPrice,
-        mark_price as markPrice,
-        implied_volatility as impliedVolatility,
-        delta, 
-        gamma, 
-        theta, 
-        vega, 
-        rho
-      FROM option_data 
-      WHERE timestamp = (
-        SELECT MAX(timestamp) FROM option_data
-      )
-      ORDER BY symbol
-    `;
-
-    return new Promise((resolve, reject) => {
-      db.all(selectSql, (err, rows) => {
-        if (err) {
-          console.error('Failed to get latest option data:', err);
-          reject(err);
-        } else {
-          resolve(rows as OptionData[]);
-        }
-      });
-    });
-  }
-
-  /**
-   * Save CVD calculation results
-   */
-  async saveCVDData(data: CVDData): Promise<void> {
-    const db = this.getDatabase();
-
-    const insertSql = `
-      INSERT INTO cvd_data (timestamp, cvd_value, z_score)
-      VALUES (?, ?, ?)
-    `;
-
-    return new Promise((resolve, reject) => {
-      db.run(insertSql, [
-        data.timestamp,
-        data.cvdValue,
-        data.zScore
-      ], (err) => {
-        if (err) {
-          console.error('Failed to save CVD data:', err);
           reject(err);
         } else {
           resolve();
@@ -379,84 +463,11 @@ export class DatabaseManager implements IDatabaseManager {
     });
   }
 
-  /**
-   * Get CVD data for Z-score calculation (last 24 hours)
-   */
-  async getCVDDataLast24Hours(): Promise<CVDData[]> {
-    const db = this.getDatabase();
-    const twentyFourHoursAgo = Date.now() - (24 * 60 * 60 * 1000);
-    
-    const selectSql = `
-      SELECT 
-        timestamp, 
-        cvd_value as cvdValue, 
-        z_score as zScore
-      FROM cvd_data 
-      WHERE timestamp >= ?
-      ORDER BY timestamp ASC
-    `;
-
+  private run(sql: string, ...params: unknown[]): Promise<void> {
+    const db = this.getDb();
     return new Promise((resolve, reject) => {
-      db.all(selectSql, [twentyFourHoursAgo], (err, rows) => {
+      db.run(sql, params, (err) => {
         if (err) {
-          console.error('Failed to get CVD data:', err);
-          reject(err);
-        } else {
-          resolve(rows as CVDData[]);
-        }
-      });
-    });
-  }
-
-  /**
-   * Get CVD data from a specific timestamp
-   */
-  async getCVDDataSince(since: number): Promise<CVDData[]> {
-    const db = this.getDatabase();
-
-    const selectSql = `
-      SELECT 
-        timestamp,
-        cvd_value as cvdValue,
-        z_score as zScore
-      FROM cvd_data
-      WHERE timestamp >= ?
-      ORDER BY timestamp ASC
-    `;
-
-    return new Promise((resolve, reject) => {
-      db.all(selectSql, [since], (err, rows) => {
-        if (err) {
-          console.error('Failed to get CVD data since timestamp:', err);
-          reject(err);
-        } else {
-          resolve(rows as CVDData[]);
-        }
-      });
-    });
-  }
-
-  /**
-   * Save alert history
-   */
-  async saveAlertHistory(alert: AlertHistory): Promise<void> {
-    const db = this.getDatabase();
-
-    const insertSql = `
-      INSERT INTO alert_history (alert_type, timestamp, value, threshold, message)
-      VALUES (?, ?, ?, ?, ?)
-    `;
-
-    return new Promise((resolve, reject) => {
-      db.run(insertSql, [
-        alert.alertType,
-        alert.timestamp,
-        alert.value,
-        alert.threshold,
-        alert.message
-      ], (err) => {
-        if (err) {
-          console.error('Failed to save alert history:', err);
           reject(err);
         } else {
           resolve();
@@ -465,55 +476,42 @@ export class DatabaseManager implements IDatabaseManager {
     });
   }
 
-  /**
-   * Get recent alert history to prevent duplicate alerts
-   */
-  async getRecentAlerts(alertType: string, minutes: number = 30): Promise<AlertHistory[]> {
-    const db = this.getDatabase();
-    const timeThreshold = Date.now() - (minutes * 60 * 1000);
-    
-    const selectSql = `
-      SELECT 
-        id,
-        alert_type as alertType,
-        timestamp,
-        value,
-        threshold,
-        message,
-        created_at as createdAt
-      FROM alert_history 
-      WHERE alert_type = ? AND timestamp >= ?
-      ORDER BY timestamp DESC
-    `;
-
+  private exec(sql: string): Promise<void> {
+    const db = this.getDb();
     return new Promise((resolve, reject) => {
-      db.all(selectSql, [alertType, timeThreshold], (err, rows) => {
+      db.exec(sql, (err) => {
         if (err) {
-          console.error('Failed to get recent alerts:', err);
           reject(err);
         } else {
-          resolve(rows as AlertHistory[]);
+          resolve();
         }
       });
     });
   }
 
-  /**
-   * Close database connection
-   */
-  async closeDatabase(): Promise<void> {
-    if (this.db) {
-      return new Promise((resolve, reject) => {
-        this.db!.close((err) => {
-          if (err) {
-            console.error('Failed to close database:', err);
-            reject(err);
-          } else {
-            this.db = null;
-            resolve();
-          }
-        });
+  private all<T = any>(sql: string, params: unknown[] = []): Promise<T[]> {
+    const db = this.getDb();
+    return new Promise((resolve, reject) => {
+      db.all(sql, params, (err, rows) => {
+        if (err) {
+          reject(err);
+        } else {
+          resolve(rows as T[]);
+        }
       });
-    }
+    });
+  }
+
+  private get<T = any>(sql: string, params: unknown[] = []): Promise<T | undefined> {
+    const db = this.getDb();
+    return new Promise((resolve, reject) => {
+      db.get(sql, params, (err, row) => {
+        if (err) {
+          reject(err);
+        } else {
+          resolve((row as T) ?? undefined);
+        }
+      });
+    });
   }
 }

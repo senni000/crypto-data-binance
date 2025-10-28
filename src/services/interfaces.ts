@@ -1,136 +1,84 @@
 /**
- * Service interfaces for the Crypto Data Alert System
+ * サービス層インターフェース定義
  */
 
-import { TradeData, OptionData, AlertMessage, CVDData, AlertHistory } from '../types';
+import {
+  MarketType,
+  OHLCVData,
+  OHLCVTimeframe,
+  SymbolMetadata,
+  TopTraderAccountData,
+  TopTraderPositionData,
+} from '../types';
 import { LogLevel } from '../types/config';
 
-/**
- * Application configuration structure
- */
 export interface AppConfig {
-  discordWebhookUrl: string;
   databasePath: string;
-  deribitApiUrl: string;
-  optionDataInterval: number;
-  cvdZScoreThreshold: number;
-  logLevel: LogLevel;
   databaseBackupEnabled: boolean;
-  databaseBackupPath: string;
+  databaseBackupDirectory: string;
   databaseBackupInterval: number;
+  logLevel: LogLevel;
+  binanceRestBaseUrl: string;
+  binanceUsdMRestBaseUrl: string;
+  binanceCoinMRestBaseUrl: string;
+  binanceWebSocketBaseUrl: string;
+  binanceUsdMWebSocketBaseUrl: string;
+  binanceCoinMWebSocketBaseUrl: string;
+  rateLimitBuffer: number;
+  restRequestTimeout: number;
+  wsReconnectInterval: number;
+  wsMaxSymbolsPerStream: number;
+  symbolUpdateHourUtc: number;
 }
 
-/**
- * Interface for data collection services
- */
 export interface IDataCollector {
-  /**
-   * Start collecting trade data from Deribit WebSocket API
-   */
-  startTradeDataCollection(): Promise<void>;
-  
-  /**
-   * Start collecting option data from Deribit REST API
-   */
-  startOptionDataCollection(): Promise<void>;
-  
-  /**
-   * Stop all data collection processes
-   */
-  stopCollection(): Promise<void>;
+  start(): Promise<void>;
+  stop(): Promise<void>;
 }
 
-/**
- * Interface for alert management services
- */
-export interface IAlertManager {
-  /**
-   * Check C-P Delta 25 moving average conditions and send alerts
-   */
-  checkCPDelta25Alert(optionData: OptionData[]): Promise<void>;
-  
-  /**
-   * Check CVD Z-score conditions and send alerts
-   */
-  checkCVDAlert(tradeData: TradeData[]): Promise<void>;
-  
-  /**
-   * Send alert message to Discord webhook
-   */
-  sendDiscordAlert(message: AlertMessage): Promise<void>;
-}
-
-/**
- * Interface for database management services
- */
 export interface IDatabaseManager {
-  /**
-   * Initialize database schema and tables
-   */
-  initializeDatabase(): Promise<void>;
-  
-  /**
-   * Save trade data to database
-   */
-  saveTradeData(data: TradeData[]): Promise<void>;
-  
-  /**
-   * Save option data to database
-   */
-  saveOptionData(data: OptionData[]): Promise<void>;
-  
-  /**
-   * Get trade data from the last 24 hours
-   */
-  getTradeDataLast24Hours(): Promise<TradeData[]>;
-  
-  /**
-   * Get the latest option data
-   */
-  getLatestOptionData(): Promise<OptionData[]>;
-  
-  /**
-   * Save CVD calculation results
-   */
-  saveCVDData(data: CVDData): Promise<void>;
-  
-  /**
-   * Get CVD data for Z-score calculation
-   */
-  getCVDDataLast24Hours(): Promise<CVDData[]>;
-
-  /**
-   * Get CVD data from a specific timestamp
-   */
-  getCVDDataSince(since: number): Promise<CVDData[]>;
-
-  /**
-   * Save alert history entry
-   */
-  saveAlertHistory(alert: AlertHistory): Promise<void>;
-
-  /**
-   * Get recent alerts for cooldown checks
-   */
-  getRecentAlerts(alertType: string, minutes?: number): Promise<AlertHistory[]>;
+  initialize(): Promise<void>;
+  runMigrations(): Promise<void>;
+  upsertSymbols(symbols: SymbolMetadata[]): Promise<void>;
+  listActiveSymbols(marketType?: MarketType): Promise<SymbolMetadata[]>;
+  listAllSymbols(): Promise<SymbolMetadata[]>;
+  markSymbolsInactive(entries: Array<{ symbol: string; marketType: MarketType }>): Promise<void>;
+  saveOHLCVBatch(data: OHLCVData[]): Promise<void>;
+  saveTopTraderPositions(data: TopTraderPositionData[]): Promise<void>;
+  saveTopTraderAccounts(data: TopTraderAccountData[]): Promise<void>;
+  pruneDataBefore(timeframe: OHLCVTimeframe, cutoff: number): Promise<void>;
+  pruneTopTraderDataBefore(cutoff: number): Promise<void>;
+  getLastOHLCVTimestamps(
+    interval: OHLCVTimeframe
+  ): Promise<Record<string, number | undefined>>;
+  getLastTopTraderTimestamp(): Promise<number | undefined>;
 }
 
-/**
- * Interface for configuration management
- */
-export interface IConfigManager {
-  /**
-   * Load and validate configuration from environment variables
-   */
-  loadConfig(): Promise<void>;
-  
-  /**
-   * Get current configuration
-   */
-  getConfig(): AppConfig;
-  
-  /**
-   * Validate configuration values
-   */
-  validateConfig(config: Partial<AppConfig>): boolean;
+export interface ISymbolManager {
+  updateSymbols(): Promise<void>;
+  scheduleDailyUpdate(): void;
+  getActiveSymbolsByMarket(market: MarketType): Promise<SymbolMetadata[]>;
+  getAllActiveSymbols(): Promise<SymbolMetadata[]>;
+}
+
+export interface RateLimiterRequest {
+  weight: number;
+  identifier?: string;
+  priority?: number;
+}
+
+export interface IRateLimiter {
+  schedule<T>(request: RateLimiterRequest, task: () => Promise<T>): Promise<T>;
+  registerEndpoint(key: string, capacity: number, intervalMs: number): void;
+  getUsageSnapshot(): RateLimiterUsageSnapshot;
+}
+
+export interface RateLimiterUsageSnapshot {
+  endpoints: Array<{
+    key: string;
+    availableTokens: number;
+    capacity: number;
+    refillIntervalMs: number;
+    queueLength: number;
+  }>;
 }

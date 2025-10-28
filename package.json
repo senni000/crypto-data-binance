@@ -1,7 +1,7 @@
 {
   "name": "crypto-data-alert",
   "version": "1.0.0",
-  "description": "暗号通貨データ収集・アラートシステム - Deribit APIからBTCデータを収集し、Discord Webhookでアラート通知を送信",
+  "description": "Binance市場データ収集システム - Spot/USDT-M/COIN-MのOHLCVとTop Trader情報を取得しSQLiteに保存",
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
@@ -15,7 +15,7 @@
     "collect:sample": "ts-node collect-data/run-sample.ts",
     "check:db": "ts-node collect-data/check-db.ts"
   },
-  "keywords": ["crypto", "bitcoin", "deribit", "alert", "discord", "webhook"],
+  "keywords": ["crypto", "binance", "ohlcv", "top-trader", "sqlite"],
   "author": "",
   "license": "MIT",
   "dependencies": {
