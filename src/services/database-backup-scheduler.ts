@@ -14,6 +14,7 @@ export interface DatabaseBackupSchedulerOptions {
   intervalMs: number;
   databaseManager: IDatabaseManager;
   retentionPolicy?: RetentionPolicy;
+  singleFileName?: string;
 }
 
 const DEFAULT_RETENTION: RetentionPolicy = {
@@ -74,12 +75,12 @@ export class DatabaseBackupScheduler {
   }
 
   private async performBackup(): Promise<void> {
-    const { sourcePath, targetDirectory } = this.options;
+    const { sourcePath, targetDirectory, singleFileName } = this.options;
     await fs.promises.access(sourcePath, fs.constants.R_OK);
     await fs.promises.mkdir(targetDirectory, { recursive: true });
 
     const timestamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
-    const backupFilename = `${BACKUP_PREFIX}${timestamp}${BACKUP_EXTENSION}`;
+    const backupFilename = singleFileName ?? `${BACKUP_PREFIX}${timestamp}${BACKUP_EXTENSION}`;
     const backupPath = path.join(targetDirectory, backupFilename);
 
     await fs.promises.copyFile(sourcePath, backupPath);
@@ -92,6 +93,9 @@ export class DatabaseBackupScheduler {
   }
 
   private async enforceRetention(): Promise<void> {
+    if (this.options.singleFileName) {
+      return;
+    }
     const retention = this.options.retentionPolicy ?? DEFAULT_RETENTION;
     const files = await this.listBackupFiles();
     const now = Date.now();

@@ -60,13 +60,16 @@ async function bootstrap(): Promise<void> {
     }
   );
 
+  const backupOptions = {
+    sourcePath: config.databasePath,
+    targetDirectory: config.databaseBackupDirectory,
+    intervalMs: config.databaseBackupInterval,
+    databaseManager,
+    ...(config.databaseBackupSingleFile ? { singleFileName: 'binance_backup.sqlite' } : {}),
+  };
+
   const backupScheduler = config.databaseBackupEnabled
-    ? new DatabaseBackupScheduler({
-        sourcePath: config.databasePath,
-        targetDirectory: config.databaseBackupDirectory,
-        intervalMs: config.databaseBackupInterval,
-        databaseManager,
-      })
+    ? new DatabaseBackupScheduler(backupOptions)
     : null;
 
   setupProcessHandlers(dataCollector, backupScheduler);

@@ -10,7 +10,7 @@ Binance スポット / USDT-M / COIN-M の市場データを収集し、SQLite �
 - **Top Trader 指標 (5m)**: USDT-M の Long/Short ポジション比率・アカウント比率を5分毎に取得し履歴化。
 - **レートリミッタ**: トークンバケット + 優先度キューでエンドポイント別ウェイトを制御。429 受信時は指数バックオフ + ジッタで自動再試行。
 - **SQLite 永続化**: シンボル、3種類の OHLCV、Top Trader の各テーブルにトランザクションバッチで書き込み。シンボルはマーケット種別との複合主キーを採用。
-- **バックアップ**: 指定ディレクトリに日次スナップショットを生成。直近 30 日のデイリーバックアップと 12 週間のウィークリーバックアップを自動保持し、古いファイルは削除。
+- **バックアップ**: 指定ディレクトリに日次スナップショットを生成。直近 7 日分の日次バックアップと最新 1 件の週次バックアップを保持し、その他は削除。バックアップ実行時に 7 日より古い OHLCV／Top Trader レコードも自動削除。
 
 ## プロジェクト構成
 
@@ -55,14 +55,21 @@ src/
    cp .env.example .env
    ```
 
-   主な設定項目:
+   主な設定項目 (括弧内は既定値):
 
-   - `DATABASE_PATH`: メイン SQLite ファイル。
-   - `DATABASE_BACKUP_PATH`: バックアップディレクトリ (日次バックアップを生成)。
-   - `BINANCE_REST_URL`, `BINANCE_USDM_REST_URL`, `BINANCE_COINM_REST_URL`: REST エンドポイント。
-   - `BINANCE_WS_URL`, `BINANCE_USDM_WS_URL`, `BINANCE_COINM_WS_URL`: WebSocket エンドポイント。
-   - `RATE_LIMIT_BUFFER`: レートリミットの安全マージン (0.1 = 10% 減)。
-   - `WS_MAX_SYMBOLS_PER_STREAM`: WebSocket 1 接続あたりの登録上限 (規定値 300)。
+   - `DATABASE_PATH`: メイン SQLite ファイルのパス (`~/workspace/crypto-data/data/binance.db`)。
+   - `DATABASE_BACKUP_ENABLED`: バックアップスケジューラを有効化するか (`true` / 無効化する場合は `false`)。
+   - `DATABASE_BACKUP_SINGLE_FILE`: `true` にするとタイムスタンプ付きスナップショットではなく単一ファイルに上書き保存。
+   - `DATABASE_BACKUP_PATH`: バックアップディレクトリ (`/Volumes/buffalohd/crypto-data/backups/binance`)。
+   - `DATABASE_BACKUP_INTERVAL_MS`: バックアップの実行間隔ミリ秒 (`86400000`)。
+   - `BINANCE_REST_URL` / `BINANCE_USDM_REST_URL` / `BINANCE_COINM_REST_URL`: REST API ベース URL。
+   - `BINANCE_WS_URL` / `BINANCE_USDM_WS_URL` / `BINANCE_COINM_WS_URL`: WebSocket ベース URL。
+   - `RATE_LIMIT_BUFFER`: レートリミットキャパシティに掛ける安全係数 (`0.1`)。
+   - `REST_REQUEST_TIMEOUT_MS`: REST リクエストのタイムアウト (`10000`)。
+   - `WS_RECONNECT_INTERVAL_MS`: WebSocket 再接続までの基準間隔 (`5000`)。
+   - `WS_MAX_SYMBOLS_PER_STREAM`: WebSocket 1 接続あたりのシンボル上限 (`300`)。
+   - `SYMBOL_UPDATE_HOUR_UTC`: シンボル同期の実行時刻 (UTC, `1`)。
+   - `LOG_LEVEL`: `error` / `warn` / `info` / `debug` (`info`)。
 
 3. ビルド & 実行
 
@@ -88,7 +95,7 @@ src/
 3. `BinanceWebSocketManager` が 1 分足ストリームを購読し、バッファを介して 5 秒ごとに `ohlcv_1m` へバルク挿入。
 4. REST スケジューラが 30 分足・日足を定期取得し、未取得期間だけを追加入力。
 5. Top Trader 指標を 5 分ごとに取得し、ポジションとアカウント比率テーブルを更新。
-6. バックアップスケジューラが日次で SQLite をコピーし、指定保有期間外のファイルを削除。併せて古い OHLCV/Top Trader データをプライマリ DB から間引き。
+6. バックアップスケジューラが日次で SQLite をコピーし、保持ポリシーに沿ってバックアップを整理。併せて 7 日より古い OHLCV/Top Trader データをプライマリ DB から間引き。`DATABASE_BACKUP_ENABLED=false` の場合は本処理をスキップ。
 
 ## ライセンス
 

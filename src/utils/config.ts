@@ -17,10 +17,10 @@ export class ConfigManager {
 
   async loadConfig(): Promise<void> {
     const databasePath = this.expandPath(
-      this.getEnvVar('DATABASE_PATH', '~/workspace/crypto-data/data/crypto_data.db')
+      this.getEnvVar('DATABASE_PATH', '~/workspace/crypto-data/data/binance.db')
     );
     const databaseBackupDirectory = this.expandPath(
-      this.getEnvVar('DATABASE_BACKUP_PATH', '~/workspace/crypto-data/backups/binance')
+      this.getEnvVar('DATABASE_BACKUP_PATH', '/Volumes/buffalohd/crypto-data/backups/binance')
     );
 
     const config: AppConfig = {
@@ -28,6 +28,7 @@ export class ConfigManager {
       databaseBackupEnabled: this.getBooleanEnvVar('DATABASE_BACKUP_ENABLED', true),
       databaseBackupDirectory,
       databaseBackupInterval: this.getNumberEnvVar('DATABASE_BACKUP_INTERVAL_MS', 24 * 60 * 60 * 1000),
+      databaseBackupSingleFile: this.getBooleanEnvVar('DATABASE_BACKUP_SINGLE_FILE', false),
       logLevel: this.getLogLevel(this.getEnvVar('LOG_LEVEL', 'info') as LogLevel),
       binanceRestBaseUrl: this.getEnvVar('BINANCE_REST_URL', 'https://api.binance.com'),
       binanceUsdMRestBaseUrl: this.getEnvVar('BINANCE_USDM_REST_URL', 'https://fapi.binance.com'),
