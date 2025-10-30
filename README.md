@@ -16,18 +16,23 @@ Binance スポット / USDT-M / COIN-M の市場データを収集し、SQLite �
 
 ```
 src/
-  index.ts                    エントリーポイント
+  index.ts                    BINANCE_PROCESS_ROLE に応じたエントリーディスパッチ
+  processes/
+    ingest.ts                 WebSocket/REST インジェスト専用プロセス
+    aggregate.ts              CVD 集計ワーカー (trade_data → cvd_data)
+    alert.ts                  アラートディスパッチャー (cvd_data → Discord)
   services/
-    data-collector.ts         WebSocket/REST 連携とスケジューラ
+    data-collector.ts         REST データ収集スケジューラ
+    trade-data-collector.ts   WebSocket インジェストとバッファ管理
+    cvd-aggregation-worker.ts CVD 集計キュー処理
+    alert-queue-processor.ts  アラートキュー監視と再送制御
     symbol-manager.ts         Binance シンボル管理
-    binance-rest-client.ts    OHLCV・Top Trader REST クライアント
-    binance-websocket-manager.ts  WebSocket 接続管理
+    binance-rest-client.ts    REST クライアント
     rate-limiter.ts           トークンバケット型レートリミッタ
     database.ts               SQLite マネージャ (マイグレーション内蔵)
     database-backup-scheduler.ts  バックアップ＆保持ポリシー
   types/                      ドメイン型定義
   utils/                      設定ロード・ロガーなど
-.kiro/specs/                  仕様・タスクドキュメント
 ```
 
 ## 主要テーブル
@@ -67,14 +72,39 @@ src/
   - `REST_REQUEST_TIMEOUT_MS`: REST リクエストのタイムアウト (`10000`)。
   - `SYMBOL_UPDATE_HOUR_UTC`: シンボル同期の実行時刻 (UTC, `1`)。
   - `LOG_LEVEL`: `error` / `warn` / `info` / `debug` (`info`)。
+  - `CVD_AGGREGATION_BATCH_SIZE`: CVD 集計で 1 バッチに読み込むトレード件数 (`500`)。
+  - `CVD_AGGREGATION_POLL_INTERVAL_MS`: 集計ワーカーのポーリング間隔ミリ秒 (`2000`)。
+  - `CVD_ALERT_SUPPRESSION_MINUTES`: 同一シンボルのアラート抑止ウィンドウ (分, `30`)。
+  - `ALERT_QUEUE_POLL_INTERVAL_MS`: アラートキュー監視のポーリング間隔ミリ秒 (`2000`)。
+  - `ALERT_QUEUE_BATCH_SIZE`: アラート処理時に取得する最大件数 (`20`)。
+  - `ALERT_QUEUE_MAX_ATTEMPTS`: 送信失敗時の再試行上限 (`5`)。
 
 3. ビルド & 実行
 
    ```bash
-   npm run build   # TypeScript を dist/ にコンパイル
-   npm start       # dist/index.js を実行
-   # 開発モード
-   npm run dev     # ts-node でホット実行
+   pnpm run build                     # TypeScript を dist/ にコンパイル
+   pnpm run start:ingest              # WebSocket/REST インジェスト
+   pnpm run start:aggregate           # CVD 集計ワーカー
+   pnpm run start:alert               # アラート送信 (ENABLE_CVD_ALERTS=true の場合)
+
+   # ts-node 開発モード
+   pnpm run dev:ingest
+   pnpm run dev:aggregate
+   pnpm run dev:alert
+   ```
+
+   ※ `BINANCE_PROCESS_ROLE` を直接指定する場合は `BINANCE_PROCESS_ROLE=aggregate pnpm start`
+   のように環境変数を渡してください。
+
+4. PM2 常駐
+
+   `ecosystem.config.js` には `binance-ingest` / `binance-aggregate` / `binance-alert` の 3 プロセスが定義されています。
+   まとめて起動・停止するには以下を利用してください。
+
+   ```bash
+   pnpm run build
+   pnpm run start:pm2
+   pnpm run stop:pm2
    ```
 
 4. テスト

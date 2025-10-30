@@ -3,6 +3,8 @@
  * Binance向けデータ収集で扱うエンティティを表現する
  */
 
+import { CvdAlertPayload } from '@crypto-data/cvd-core';
+
 export type MarketType = 'SPOT' | 'USDT-M' | 'COIN-M';
 
 export interface SymbolMetadata {
@@ -98,6 +100,64 @@ export interface WebSocketKlinePayload {
       B: string;
     };
   };
+}
+
+export interface TradeData {
+  symbol: string;
+  timestamp: number;
+  price: number;
+  amount: number;
+  direction: 'buy' | 'sell';
+  tradeId: string;
+  marketType: MarketType;
+  streamType: 'aggTrade' | 'trade';
+}
+
+export interface CVDData {
+  symbol: string;
+  timestamp: number;
+  cvdValue: number;
+  zScore: number;
+  delta: number;
+  deltaZScore: number;
+}
+
+export interface AlertHistory {
+  id?: number;
+  alertType: string;
+  symbol: string;
+  timestamp: number;
+  value: number;
+  threshold: number;
+  message: string;
+  createdAt?: string;
+}
+
+export interface TradeDataRow extends TradeData {
+  rowId: number;
+}
+
+export interface AlertQueueRecord {
+  id: number;
+  alertType: string;
+  payload: CvdAlertPayload;
+  attemptCount: number;
+  lastError?: string | null;
+  processedAt?: number | null;
+  enqueuedAt?: number;
+}
+
+export interface CvdStreamConfig {
+  symbol: string;
+  marketType: MarketType;
+  streamType?: 'aggTrade' | 'trade';
+}
+
+export interface CvdAggregatorConfig {
+  id: string;
+  displayName: string;
+  streams: CvdStreamConfig[];
+  alertsEnabled?: boolean;
 }
 
 export interface WebSocketAggTradePayload {

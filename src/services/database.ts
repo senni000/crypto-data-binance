@@ -16,8 +16,14 @@ import {
   SymbolMetadata,
   TopTraderAccountData,
   TopTraderPositionData,
+  TradeData,
+  CVDData,
+  AlertHistory,
+  TradeDataRow,
+  AlertQueueRecord,
 } from '../types';
-import { IDatabaseManager } from './interfaces';
+import { IDatabaseManager, ProcessingState } from './interfaces';
+import { CvdAlertPayload } from '@crypto-data/cvd-core';
 
 sqlite3.verbose();
 
@@ -144,6 +150,84 @@ const MIGRATIONS: Migration[] = [
       `CREATE INDEX IF NOT EXISTS idx_agg_trades_time ON agg_trades(symbol, market_type, trade_time)`
     ],
   },
+  {
+    id: 3,
+    name: 'create_trade_and_alert_tables',
+    statements: [
+      `CREATE TABLE IF NOT EXISTS trade_data (
+        symbol TEXT NOT NULL,
+        market_type TEXT NOT NULL,
+        trade_id TEXT NOT NULL,
+        timestamp INTEGER NOT NULL,
+        price REAL NOT NULL,
+        amount REAL NOT NULL,
+        direction TEXT NOT NULL,
+        stream_type TEXT NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (symbol, market_type, trade_id)
+      )`,
+      `CREATE TABLE IF NOT EXISTS cvd_data (
+        symbol TEXT NOT NULL,
+        timestamp INTEGER NOT NULL,
+        cvd_value REAL NOT NULL,
+        z_score REAL NOT NULL,
+        delta_value REAL NOT NULL DEFAULT 0,
+        delta_z_score REAL NOT NULL DEFAULT 0,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (symbol, timestamp)
+      )`,
+      `CREATE TABLE IF NOT EXISTS alert_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        alert_type TEXT NOT NULL,
+        symbol TEXT NOT NULL,
+        timestamp INTEGER NOT NULL,
+        value REAL NOT NULL,
+        threshold REAL NOT NULL,
+        message TEXT NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_trade_data_timestamp ON trade_data(timestamp)`,
+      `CREATE INDEX IF NOT EXISTS idx_trade_data_symbol_market ON trade_data(symbol, market_type)`,
+      `CREATE INDEX IF NOT EXISTS idx_cvd_data_symbol_timestamp ON cvd_data(symbol, timestamp)`,
+      `CREATE INDEX IF NOT EXISTS idx_alert_history_lookup ON alert_history(alert_type, symbol, timestamp)`
+    ],
+  },
+  {
+    id: 4,
+    name: 'create_processing_state_and_alert_queue',
+    statements: [
+      `CREATE TABLE IF NOT EXISTS processing_state (
+        process_name TEXT NOT NULL,
+        key TEXT NOT NULL,
+        last_row_id INTEGER NOT NULL,
+        last_timestamp INTEGER NOT NULL,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (process_name, key)
+      )`,
+      `CREATE TABLE IF NOT EXISTS alert_queue (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        alert_type TEXT NOT NULL,
+        symbol TEXT NOT NULL,
+        timestamp INTEGER NOT NULL,
+        trigger_source TEXT NOT NULL,
+        trigger_z_score REAL NOT NULL,
+        z_score REAL NOT NULL,
+        delta REAL NOT NULL,
+        delta_z_score REAL NOT NULL,
+        threshold REAL NOT NULL,
+        cumulative_value REAL NOT NULL,
+        payload_json TEXT NOT NULL,
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT,
+        processed_at DATETIME,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_alert_queue_pending ON alert_queue(processed_at, timestamp)`,
+      `CREATE INDEX IF NOT EXISTS idx_alert_queue_symbol ON alert_queue(symbol, processed_at)`,
+      `CREATE INDEX IF NOT EXISTS idx_alert_queue_type ON alert_queue(alert_type, processed_at)`
+    ],
+  },
 ];
 
 export class DatabaseManager implements IDatabaseManager {
@@ -181,6 +265,7 @@ export class DatabaseManager implements IDatabaseManager {
           migration.name
         );
       }
+      await this.ensureCvdDeltaColumns();
       await this.exec('COMMIT');
     } catch (error) {
       await this.exec('ROLLBACK');
@@ -334,6 +419,339 @@ export class DatabaseManager implements IDatabaseManager {
     });
   }
 
+  async saveTradeData(data: TradeData[]): Promise<void> {
+    if (data.length === 0) {
+      return;
+    }
+
+    const sql = `
+      INSERT OR IGNORE INTO trade_data (
+        symbol, market_type, trade_id, timestamp, price, amount, direction, stream_type
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `;
+
+    await this.withTransaction(async (db) => {
+      for (const trade of data) {
+        await this.runSql(db, sql, [
+          trade.symbol,
+          trade.marketType,
+          trade.tradeId,
+          trade.timestamp,
+          trade.price,
+          trade.amount,
+          trade.direction,
+          trade.streamType,
+        ]);
+      }
+    });
+  }
+
+  async saveCVDData(data: CVDData): Promise<void> {
+    await this.run(
+      `INSERT OR REPLACE INTO cvd_data (symbol, timestamp, cvd_value, z_score, delta_value, delta_z_score)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      data.symbol,
+      data.timestamp,
+      data.cvdValue,
+      data.zScore,
+      data.delta ?? 0,
+      data.deltaZScore ?? 0
+    );
+  }
+
+  async getCVDDataSince(symbol: string, since: number): Promise<CVDData[]> {
+    const rows = await this.all<{
+      symbol: string;
+      timestamp: number;
+      cvd_value: number;
+      z_score: number;
+      delta_value: number;
+      delta_z_score: number;
+    }>(
+      `SELECT symbol, timestamp, cvd_value, z_score, delta_value, delta_z_score
+       FROM cvd_data
+       WHERE symbol = ? AND timestamp >= ?
+       ORDER BY timestamp ASC`,
+      [symbol, since]
+    );
+    return rows.map((row) => ({
+      symbol: row.symbol,
+      timestamp: Number(row.timestamp),
+      cvdValue: Number(row.cvd_value),
+      zScore: Number(row.z_score),
+      delta: Number(row.delta_value ?? 0),
+      deltaZScore: Number(row.delta_z_score ?? 0),
+    }));
+  }
+
+  async saveAlertHistory(alert: AlertHistory): Promise<void> {
+    await this.run(
+      `INSERT INTO alert_history (
+        alert_type, symbol, timestamp, value, threshold, message
+      ) VALUES (?, ?, ?, ?, ?, ?)`,
+      alert.alertType,
+      alert.symbol,
+      alert.timestamp,
+      alert.value,
+      alert.threshold,
+      alert.message
+    );
+  }
+
+  async getRecentAlerts(alertType: string, symbol: string, minutes = 30): Promise<AlertHistory[]> {
+    const cutoff = Date.now() - minutes * 60 * 1000;
+    const rows = await this.all<{
+      id: number;
+      alert_type: string;
+      symbol: string;
+      timestamp: number;
+      value: number;
+      threshold: number;
+      message: string;
+      created_at: string;
+    }>(
+      `SELECT id, alert_type, symbol, timestamp, value, threshold, message, created_at
+       FROM alert_history
+       WHERE alert_type = ? AND symbol = ? AND timestamp >= ?
+       ORDER BY timestamp DESC`,
+      [alertType, symbol, cutoff]
+    );
+
+    return rows.map((row) => ({
+      id: row.id,
+      alertType: row.alert_type,
+      symbol: row.symbol,
+      timestamp: Number(row.timestamp),
+      value: Number(row.value),
+      threshold: Number(row.threshold),
+      message: row.message,
+      createdAt: row.created_at,
+    }));
+  }
+
+  async getTradeDataSinceRowId(
+    filters: Array<{ symbol: string; marketType: MarketType; streamType: TradeData['streamType'] }>,
+    lastRowId: number,
+    limit: number
+  ): Promise<TradeDataRow[]> {
+    if (filters.length === 0) {
+      return [];
+    }
+
+    const conditions = filters
+      .map(() => '(symbol = ? AND market_type = ? AND stream_type = ?)')
+      .join(' OR ');
+    const params: Array<string | number> = [lastRowId];
+    for (const filter of filters) {
+      params.push(filter.symbol.toUpperCase(), filter.marketType, filter.streamType);
+    }
+    params.push(Math.max(1, Math.floor(limit)));
+
+    const rows = await this.all<{
+      rowId: number;
+      symbol: string;
+      marketType: string;
+      tradeId: string;
+      timestamp: number;
+      price: number;
+      amount: number;
+      direction: string;
+      streamType: string;
+    }>(
+      `SELECT rowid as rowId, symbol, market_type as marketType, trade_id as tradeId, timestamp, price, amount, direction, stream_type as streamType
+       FROM trade_data
+       WHERE rowid > ? AND (${conditions})
+       ORDER BY rowid ASC
+       LIMIT ?`,
+      params
+    );
+
+    return rows.map((row) => ({
+      rowId: Number(row.rowId),
+      symbol: row.symbol,
+      marketType: row.marketType as MarketType,
+      tradeId: row.tradeId,
+      timestamp: Number(row.timestamp),
+      price: Number(row.price),
+      amount: Number(row.amount),
+      direction: row.direction as TradeData['direction'],
+      streamType: row.streamType as TradeData['streamType'],
+    }));
+  }
+
+  async getProcessingState(processName: string, key: string): Promise<ProcessingState | null> {
+    const row = await this.get<{ last_row_id: number; last_timestamp: number }>(
+      `SELECT last_row_id, last_timestamp
+       FROM processing_state
+       WHERE process_name = ? AND key = ?`,
+      [processName, key]
+    );
+
+    if (!row) {
+      return null;
+    }
+
+    return {
+      lastRowId: Number(row.last_row_id ?? 0),
+      lastTimestamp: Number(row.last_timestamp ?? 0),
+    };
+  }
+
+  async saveProcessingState(processName: string, key: string, state: ProcessingState): Promise<void> {
+    await this.run(
+      `INSERT INTO processing_state (process_name, key, last_row_id, last_timestamp, updated_at)
+       VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+       ON CONFLICT(process_name, key)
+       DO UPDATE SET last_row_id = excluded.last_row_id,
+                     last_timestamp = excluded.last_timestamp,
+                     updated_at = CURRENT_TIMESTAMP`,
+      processName,
+      key,
+      state.lastRowId,
+      state.lastTimestamp
+    );
+  }
+
+  async enqueueAlert(alertType: string, payload: CvdAlertPayload): Promise<number> {
+    return new Promise<number>((resolve, reject) => {
+      const db = this.getDb();
+      db.run(
+        `INSERT INTO alert_queue (
+          alert_type,
+          symbol,
+          timestamp,
+          trigger_source,
+          trigger_z_score,
+          z_score,
+          delta,
+          delta_z_score,
+          threshold,
+          cumulative_value,
+          payload_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          alertType,
+          payload.symbol,
+          payload.timestamp,
+          payload.triggerSource,
+          payload.triggerZScore,
+          payload.zScore,
+          payload.delta,
+          payload.deltaZScore,
+          payload.threshold,
+          payload.cumulativeValue,
+          JSON.stringify(payload),
+        ],
+        function (err) {
+          if (err) {
+            reject(err);
+          } else {
+            resolve(Number(this.lastID));
+          }
+        }
+      );
+    });
+  }
+
+  async getPendingAlerts(limit: number): Promise<AlertQueueRecord[]> {
+    const rows = await this.all<{
+      id: number;
+      alert_type: string;
+      payload_json: string;
+      attempt_count: number;
+      last_error: string | null;
+      processed_at: string | null;
+      created_at: string;
+    }>(
+      `SELECT id, alert_type, payload_json, attempt_count, last_error, processed_at, created_at
+       FROM alert_queue
+       WHERE processed_at IS NULL
+       ORDER BY timestamp ASC, id ASC
+       LIMIT ?`,
+      [Math.max(1, Math.floor(limit))]
+    );
+
+    return rows.map((row) => {
+      const record: AlertQueueRecord = {
+        id: row.id,
+        alertType: row.alert_type,
+        payload: JSON.parse(row.payload_json) as CvdAlertPayload,
+        attemptCount: Number(row.attempt_count ?? 0),
+        lastError: row.last_error,
+        processedAt: row.processed_at ? new Date(row.processed_at).getTime() : null,
+      };
+
+      if (row.created_at) {
+        record.enqueuedAt = new Date(row.created_at).getTime();
+      }
+
+      return record;
+    });
+  }
+
+  async markAlertAttempt(id: number): Promise<void> {
+    await this.run(
+      `UPDATE alert_queue
+       SET attempt_count = attempt_count + 1,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = ?`,
+      id
+    );
+  }
+
+  async markAlertProcessed(id: number, options: { clearError?: boolean } = {}): Promise<void> {
+    const clearError = options.clearError ?? true;
+    await this.run(
+      `UPDATE alert_queue
+       SET processed_at = CURRENT_TIMESTAMP,
+           last_error = CASE WHEN ? THEN NULL ELSE last_error END,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = ?`,
+      clearError ? 1 : 0,
+      id
+    );
+  }
+
+  async markAlertFailure(id: number, error: string): Promise<void> {
+    await this.run(
+      `UPDATE alert_queue
+       SET last_error = ?,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = ?`,
+      this.truncateErrorMessage(error),
+      id
+    );
+  }
+
+  async hasRecentAlertOrPending(alertType: string, symbol: string, sinceTimestamp: number): Promise<boolean> {
+    const pending = await this.get<{ exists: number }>(
+      `SELECT 1 as exists
+       FROM alert_queue
+       WHERE alert_type = ?
+         AND symbol = ?
+         AND (
+           processed_at IS NULL
+           OR timestamp >= ?
+         )
+       LIMIT 1`,
+      [alertType, symbol, sinceTimestamp]
+    );
+
+    if (pending) {
+      return true;
+    }
+
+    const history = await this.get<{ exists: number }>(
+      `SELECT 1 as exists
+       FROM alert_history
+       WHERE alert_type = ? AND symbol = ? AND timestamp >= ?
+       LIMIT 1`,
+      [alertType, symbol, sinceTimestamp]
+    );
+
+    return Boolean(history);
+  }
+
   async saveTopTraderPositions(data: TopTraderPositionData[]): Promise<void> {
     if (data.length === 0) {
       return;
@@ -438,6 +856,26 @@ export class DatabaseManager implements IDatabaseManager {
     return row?.timestamp ?? undefined;
   }
 
+  private async ensureCvdDeltaColumns(): Promise<void> {
+    const hasDeltaValue = await this.columnExists('cvd_data', 'delta_value');
+    if (!hasDeltaValue) {
+      await this.run('ALTER TABLE cvd_data ADD COLUMN delta_value REAL NOT NULL DEFAULT 0');
+    }
+
+    const hasDeltaZScore = await this.columnExists('cvd_data', 'delta_z_score');
+    if (!hasDeltaZScore) {
+      await this.run('ALTER TABLE cvd_data ADD COLUMN delta_z_score REAL NOT NULL DEFAULT 0');
+    }
+  }
+
+  private truncateErrorMessage(message: string, maxLength = 512): string {
+    const normalized = message ?? '';
+    if (normalized.length <= maxLength) {
+      return normalized;
+    }
+    return `${normalized.slice(0, Math.max(0, maxLength - 3))}...`;
+  }
+
   private getOhlcvTable(interval: OHLCVTimeframe): string {
     switch (interval) {
       case '1m':
@@ -473,6 +911,11 @@ export class DatabaseManager implements IDatabaseManager {
   private async ensureDirectory(): Promise<void> {
     const dir = path.dirname(this.databasePath);
     await fs.promises.mkdir(dir, { recursive: true });
+  }
+
+  private async columnExists(table: string, column: string): Promise<boolean> {
+    const rows = await this.all<{ name: string }>(`PRAGMA table_info(${table})`);
+    return rows.some((row) => row.name === column);
   }
 
   private async openDatabase(): Promise<void> {
