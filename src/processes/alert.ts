@@ -12,8 +12,9 @@ async function bootstrap(): Promise<void> {
   logger.setLevel(config.logLevel);
 
   if (!config.enableCvdAlerts) {
-    logger.warn('CVD alerts are disabled; exiting alert dispatcher.');
-    process.exit(0);
+    logger.warn('CVD alerts are disabled; keeping dispatcher idle to avoid PM2 restarts.');
+    setupProcessHandlers();
+    await waitIndefinitely();
     return;
   }
 
@@ -72,12 +73,14 @@ function bindProcessorEvents(processor: AlertQueueProcessor): void {
   });
 }
 
-function setupProcessHandlers(processor: AlertQueueProcessor): void {
+function setupProcessHandlers(processor?: AlertQueueProcessor): void {
   const shutdown = async (signal: NodeJS.Signals) => {
     logger.info(`Received ${signal}, shutting down alert dispatcher...`);
-    await processor.stop().catch((error) => {
-      logger.error('Failed to stop alert processor gracefully', error);
-    });
+    if (processor) {
+      await processor.stop().catch((error) => {
+        logger.error('Failed to stop alert processor gracefully', error);
+      });
+    }
     process.exit(0);
   };
 
@@ -91,6 +94,12 @@ function setupProcessHandlers(processor: AlertQueueProcessor): void {
   process.on('uncaughtException', (error) => {
     logger.error('Uncaught exception', error);
     process.exit(1);
+  });
+}
+
+async function waitIndefinitely(): Promise<void> {
+  await new Promise<void>(() => {
+    // noop promise keeps the process alive until an explicit signal triggers exit
   });
 }
 

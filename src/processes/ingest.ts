@@ -86,6 +86,7 @@ async function bootstrap(): Promise<void> {
         targetDirectory: config.databaseBackupDirectory,
         intervalMs: config.databaseBackupInterval,
         databaseManager,
+        ...(config.databaseRetentionMs != null ? { dataRetentionMs: config.databaseRetentionMs } : {}),
         ...(config.databaseBackupSingleFile ? { singleFileName: 'binance_backup.sqlite' } : {}),
       })
     : null;

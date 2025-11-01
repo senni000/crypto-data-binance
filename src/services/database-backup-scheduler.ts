@@ -15,6 +15,7 @@ export interface DatabaseBackupSchedulerOptions {
   databaseManager: IDatabaseManager;
   retentionPolicy?: RetentionPolicy;
   singleFileName?: string;
+  dataRetentionMs?: number | null;
 }
 
 const DEFAULT_RETENTION: RetentionPolicy = {
@@ -24,6 +25,7 @@ const DEFAULT_RETENTION: RetentionPolicy = {
 
 const BACKUP_PREFIX = 'binance_data_';
 const BACKUP_EXTENSION = '.sqlite';
+const DEFAULT_DATA_RETENTION_MS = 3 * 24 * 60 * 60 * 1000;
 
 export class DatabaseBackupScheduler {
   private timer: NodeJS.Timeout | null = null;
@@ -142,13 +144,18 @@ export class DatabaseBackupScheduler {
   }
 
   private async pruneHistoricalData(): Promise<void> {
+    const retentionMs = this.options.dataRetentionMs ?? DEFAULT_DATA_RETENTION_MS;
+    if (retentionMs === null || retentionMs <= 0) {
+      return;
+    }
+
     const now = Date.now();
-    const sevenDaysAgo = now - 7 * 24 * 60 * 60 * 1000;
+    const cutoff = now - retentionMs;
     try {
-      await this.options.databaseManager.pruneDataBefore('1m', sevenDaysAgo);
-      await this.options.databaseManager.pruneDataBefore('30m', sevenDaysAgo);
-      await this.options.databaseManager.pruneDataBefore('1d', sevenDaysAgo);
-      await this.options.databaseManager.pruneTopTraderDataBefore(sevenDaysAgo);
+      await this.options.databaseManager.pruneDataBefore('1m', cutoff);
+      await this.options.databaseManager.pruneDataBefore('30m', cutoff);
+      await this.options.databaseManager.pruneDataBefore('1d', cutoff);
+      await this.options.databaseManager.pruneTopTraderDataBefore(cutoff);
     } catch (error) {
       logger.warn('Failed to prune historical data', error);
     }

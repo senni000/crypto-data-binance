@@ -21,6 +21,9 @@ export class ConfigManager {
     const databaseBackupDirectory = this.expandPath(
       this.getEnvVar('DATABASE_BACKUP_PATH', '/Volumes/buffalohd/crypto-data/backups/binance')
     );
+    const retentionDays = this.getNumberEnvVar('DATABASE_RETENTION_DAYS', 3);
+    const databaseRetentionMs =
+      retentionDays > 0 ? Math.floor(retentionDays * 24 * 60 * 60 * 1000) : null;
 
     const aggTradeDataDirectory = this.expandPath(
       this.getEnvVar(
@@ -42,6 +45,7 @@ export class ConfigManager {
       databaseBackupDirectory,
       databaseBackupInterval: this.getNumberEnvVar('DATABASE_BACKUP_INTERVAL_MS', 24 * 60 * 60 * 1000),
       databaseBackupSingleFile: this.getBooleanEnvVar('DATABASE_BACKUP_SINGLE_FILE', false),
+      databaseRetentionMs,
       logLevel: this.getLogLevel(this.getEnvVar('LOG_LEVEL', 'info') as LogLevel),
       binanceRestBaseUrl: this.getEnvVar('BINANCE_REST_URL', 'https://api.binance.com'),
       binanceUsdMRestBaseUrl: this.getEnvVar('BINANCE_USDM_REST_URL', 'https://fapi.binance.com'),

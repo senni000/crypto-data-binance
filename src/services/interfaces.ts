@@ -28,6 +28,7 @@ export interface AppConfig {
   databaseBackupDirectory: string;
   databaseBackupInterval: number;
   databaseBackupSingleFile: boolean;
+  databaseRetentionMs: number | null;
   logLevel: LogLevel;
   binanceRestBaseUrl: string;
   binanceUsdMRestBaseUrl: string;
