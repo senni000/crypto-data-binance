@@ -147,6 +147,31 @@ export interface AlertQueueRecord {
   enqueuedAt?: number;
 }
 
+export interface LiquidationEvent {
+  /**
+   * 重複排除のためのユニークキー
+   */
+  eventId: string;
+  symbol: string;
+  marketType: Extract<MarketType, 'USDT-M' | 'COIN-M'>;
+  side: 'buy' | 'sell';
+  orderType?: string;
+  timeInForce?: string;
+  status?: string;
+  orderId?: string;
+  price: number;
+  averagePrice?: number;
+  lastFilledPrice?: number;
+  originalQuantity: number;
+  filledQuantity: number;
+  lastFilledQuantity?: number;
+  eventTime: number;
+  tradeTime?: number;
+  isMaker?: boolean;
+  reduceOnly?: boolean;
+  createdAt: number;
+}
+
 export interface CvdStreamConfig {
   symbol: string;
   marketType: MarketType;

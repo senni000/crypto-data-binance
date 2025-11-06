@@ -11,4 +11,6 @@ export { AlertService } from './alert-service';
 export { BinanceTradeWebSocketClient } from './binance-trade-websocket-client';
 export { CvdAggregationWorker } from './cvd-aggregation-worker';
 export { AlertQueueProcessor } from './alert-queue-processor';
+export { LiquidationDataCollector } from './liquidation-data-collector';
+export { BinanceLiquidationWebSocketClient } from './binance-liquidation-websocket-client';
 export * from './interfaces';

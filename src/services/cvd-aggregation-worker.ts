@@ -8,10 +8,23 @@ import { IDatabaseManager } from './interfaces';
 import { CvdAggregatorConfig, TradeData, TradeDataRow, CvdStreamConfig } from '../types';
 import { logger } from '../utils/logger';
 
+const THREE_DAY_WINDOW_MS = 72 * 60 * 60 * 1000;
+
 export interface CvdAggregationWorkerOptions {
   batchSize?: number;
   pollIntervalMs?: number;
   suppressionWindowMinutes?: number;
+}
+
+interface ExtendedCvdAlertPayload extends CvdAlertPayload {
+  rawThreshold: number;
+  logThreshold: number;
+  rawTriggerZScore: number;
+  logTriggerZScore: number;
+  rawZScore: number;
+  rawDeltaZScore: number;
+  logZScore?: number;
+  logDeltaZScore?: number;
 }
 
 export declare interface CvdAggregationWorker {
@@ -26,6 +39,9 @@ export class CvdAggregationWorker extends EventEmitter {
   private readonly batchSize: number;
   private readonly pollIntervalMs: number;
   private readonly suppressionWindowMs: number;
+  private readonly logZScoreThreshold: number;
+  private readonly rawZScoreThreshold: number;
+  private readonly historyWindowMs: number;
   private readonly aggregators = new Map<string, CumulativeCvdAggregator>();
   private readonly streamMap = new Map<string, NormalizedStream[]>();
   private running = false;
@@ -35,7 +51,7 @@ export class CvdAggregationWorker extends EventEmitter {
   constructor(
     private readonly databaseManager: IDatabaseManager,
     private readonly aggregatorConfigs: CvdAggregatorConfig[],
-    private readonly threshold: number,
+    threshold: number,
     private readonly alertsEnabled: boolean,
     options: CvdAggregationWorkerOptions = {}
   ) {
@@ -43,6 +59,9 @@ export class CvdAggregationWorker extends EventEmitter {
     this.batchSize = Math.max(1, Math.floor(options.batchSize ?? 500));
     this.pollIntervalMs = Math.max(500, Math.floor(options.pollIntervalMs ?? 2_000));
     this.suppressionWindowMs = Math.max(1, Math.floor((options.suppressionWindowMinutes ?? 30) * 60 * 1000));
+    this.logZScoreThreshold = Math.max(threshold, 0.1);
+    this.rawZScoreThreshold = Math.exp(this.logZScoreThreshold);
+    this.historyWindowMs = THREE_DAY_WINDOW_MS;
 
     for (const config of aggregatorConfigs) {
       this.streamMap.set(config.id, this.normalizeStreams(config.streams));
@@ -120,7 +139,8 @@ export class CvdAggregationWorker extends EventEmitter {
 
     const options: CumulativeCvdAggregatorOptions = {
       symbol: config.id,
-      threshold: this.threshold,
+      threshold: this.rawZScoreThreshold,
+      historyWindowMs: this.historyWindowMs,
       tradeFilter: (trade) =>
         streams.some(
           (stream) =>
@@ -246,7 +266,15 @@ export class CvdAggregationWorker extends EventEmitter {
       return;
     }
     try {
-      await this.databaseManager.enqueueAlert('CVD_ZSCORE', payload);
+      const transformed = this.buildAlertPayload(payload);
+      if (!transformed) {
+        logger.debug('Dropping CVD alert due to insufficient log Z-score', {
+          symbol: config.id,
+          triggerZScore: payload.triggerZScore,
+        });
+        return;
+      }
+      await this.databaseManager.enqueueAlert('CVD_ZSCORE', transformed);
     } catch (error) {
       logger.error('Failed to enqueue CVD alert payload', {
         aggregatorId: config.id,
@@ -254,6 +282,48 @@ export class CvdAggregationWorker extends EventEmitter {
       });
       this.emit('error', error instanceof Error ? error : new Error(String(error)));
     }
+  }
+
+  private buildAlertPayload(payload: CvdAlertPayload): ExtendedCvdAlertPayload | null {
+    const logTriggerZScore = this.toSignedLog(payload.triggerZScore);
+    if (Math.abs(logTriggerZScore) < this.logZScoreThreshold) {
+      return null;
+    }
+
+    const logZScore = this.toSignedLog(payload.zScore);
+    const logDeltaZScore = this.toSignedLog(payload.deltaZScore);
+
+    const enriched: ExtendedCvdAlertPayload = {
+      ...payload,
+      threshold: this.logZScoreThreshold,
+      rawThreshold: this.rawZScoreThreshold,
+      logThreshold: this.logZScoreThreshold,
+      rawTriggerZScore: payload.triggerZScore,
+      logTriggerZScore,
+      rawZScore: payload.zScore,
+      rawDeltaZScore: payload.deltaZScore,
+    };
+
+    if (Number.isFinite(logZScore)) {
+      enriched.logZScore = logZScore;
+    }
+    if (Number.isFinite(logDeltaZScore)) {
+      enriched.logDeltaZScore = logDeltaZScore;
+    }
+
+    return enriched;
+  }
+
+  private toSignedLog(value: number): number {
+    if (!Number.isFinite(value)) {
+      return 0;
+    }
+    const magnitude = Math.abs(value);
+    if (magnitude < 1) {
+      return 0;
+    }
+    const logMagnitude = Math.log(magnitude);
+    return value >= 0 ? logMagnitude : -logMagnitude;
   }
 
   private waiters: Array<() => void> = [];

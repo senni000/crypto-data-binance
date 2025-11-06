@@ -21,6 +21,7 @@ import {
   AlertHistory,
   TradeDataRow,
   AlertQueueRecord,
+  LiquidationEvent,
 } from '../types';
 import { IDatabaseManager, ProcessingState } from './interfaces';
 import { CvdAlertPayload } from '@crypto-data/cvd-core';
@@ -226,6 +227,34 @@ const MIGRATIONS: Migration[] = [
       `CREATE INDEX IF NOT EXISTS idx_alert_queue_pending ON alert_queue(processed_at, timestamp)`,
       `CREATE INDEX IF NOT EXISTS idx_alert_queue_symbol ON alert_queue(symbol, processed_at)`,
       `CREATE INDEX IF NOT EXISTS idx_alert_queue_type ON alert_queue(alert_type, processed_at)`
+    ],
+  },
+  {
+    id: 5,
+    name: 'create_liquidation_events_table',
+    statements: [
+      `CREATE TABLE IF NOT EXISTS liquidation_events (
+        event_id TEXT PRIMARY KEY,
+        symbol TEXT NOT NULL,
+        market_type TEXT NOT NULL,
+        side TEXT NOT NULL,
+        price REAL NOT NULL,
+        average_price REAL,
+        last_filled_price REAL,
+        original_quantity REAL NOT NULL,
+        filled_quantity REAL NOT NULL,
+        last_filled_quantity REAL,
+        event_time INTEGER NOT NULL,
+        trade_time INTEGER,
+        order_type TEXT,
+        time_in_force TEXT,
+        status TEXT,
+        order_id TEXT,
+        is_maker INTEGER NOT NULL,
+        reduce_only INTEGER,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_liquidation_events_symbol_time ON liquidation_events(symbol, market_type, event_time)`
     ],
   },
 ];
@@ -441,6 +470,62 @@ export class DatabaseManager implements IDatabaseManager {
           trade.amount,
           trade.direction,
           trade.streamType,
+        ]);
+      }
+    });
+  }
+
+  async saveLiquidationEvents(events: LiquidationEvent[]): Promise<void> {
+    if (events.length === 0) {
+      return;
+    }
+
+    const sql = `
+      INSERT OR IGNORE INTO liquidation_events (
+        event_id,
+        symbol,
+        market_type,
+        side,
+        price,
+        average_price,
+        last_filled_price,
+        original_quantity,
+        filled_quantity,
+        last_filled_quantity,
+        event_time,
+        trade_time,
+        order_type,
+        time_in_force,
+        status,
+        order_id,
+        is_maker,
+        reduce_only,
+        created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `;
+
+    await this.withTransaction(async (db) => {
+      for (const event of events) {
+        await this.runSql(db, sql, [
+          event.eventId,
+          event.symbol,
+          event.marketType,
+          event.side,
+          event.price,
+          event.averagePrice ?? null,
+          event.lastFilledPrice ?? null,
+          event.originalQuantity,
+          event.filledQuantity,
+          event.lastFilledQuantity ?? null,
+          event.eventTime,
+          event.tradeTime ?? null,
+          event.orderType ?? null,
+          event.timeInForce ?? null,
+          event.status ?? null,
+          event.orderId ?? null,
+          event.isMaker ? 1 : 0,
+          event.reduceOnly === undefined ? null : event.reduceOnly ? 1 : 0,
+          new Date(event.createdAt).toISOString(),
         ]);
       }
     });

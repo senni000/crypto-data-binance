@@ -16,6 +16,7 @@ import {
   CvdAggregatorConfig,
   TradeDataRow,
   AlertQueueRecord,
+  LiquidationEvent,
 } from '../types';
 import { LogLevel } from '../types/config';
 import { CvdAlertPayload } from '@crypto-data/cvd-core';
@@ -44,6 +45,8 @@ export interface AppConfig {
   cvdAggregators: CvdAggregatorConfig[];
   tradeFlushIntervalMs: number;
   tradeMaxBufferSize: number;
+  liquidationFlushIntervalMs: number;
+  liquidationMaxBufferSize: number;
   cvdAggregationBatchSize: number;
   cvdAggregationPollIntervalMs: number;
   cvdAlertSuppressionMinutes: number;
@@ -62,6 +65,11 @@ export interface ITradeDataCollector {
   stopCollection(): Promise<void>;
 }
 
+export interface ILiquidationDataCollector {
+  start(): Promise<void>;
+  stop(): Promise<void>;
+}
+
 export interface IDatabaseManager {
   initialize(): Promise<void>;
   runMigrations(): Promise<void>;
@@ -71,6 +79,7 @@ export interface IDatabaseManager {
   markSymbolsInactive(entries: Array<{ symbol: string; marketType: MarketType }>): Promise<void>;
   saveOHLCVBatch(data: OHLCVData[]): Promise<void>;
   saveAggTrades(trades: AggTrade[]): Promise<void>;
+  saveLiquidationEvents(events: LiquidationEvent[]): Promise<void>;
   saveTopTraderPositions(data: TopTraderPositionData[]): Promise<void>;
   saveTopTraderAccounts(data: TopTraderAccountData[]): Promise<void>;
   pruneDataBefore(timeframe: OHLCVTimeframe, cutoff: number): Promise<void>;

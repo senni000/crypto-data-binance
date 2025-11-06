@@ -10,8 +10,8 @@ import {
   AggTradeDatabaseManager,
   DataCollector,
   AggTradeCollector,
-  DatabaseBackupScheduler,
   TradeDataCollector,
+  LiquidationDataCollector,
 } from '../services';
 import { CvdAggregatorConfig, CvdStreamConfig, MarketType } from '../types';
 
@@ -54,6 +54,14 @@ async function bootstrap(): Promise<void> {
     maxBufferSize: config.tradeMaxBufferSize,
   });
 
+  const liquidationCollector = new LiquidationDataCollector(databaseManager, {
+    usdMWsUrl: config.binanceUsdMWsUrl,
+    coinMWsUrl: config.binanceCoinMWsUrl,
+    subscriptions: buildLiquidationSubscriptions(config.cvdAggregators),
+    flushIntervalMs: config.liquidationFlushIntervalMs,
+    maxBufferSize: config.liquidationMaxBufferSize,
+  });
+
   const dataCollector = new DataCollector(
     databaseManager,
     symbolManager,
@@ -80,33 +88,21 @@ async function bootstrap(): Promise<void> {
     }
   );
 
-  const backupScheduler = config.databaseBackupEnabled
-    ? new DatabaseBackupScheduler({
-        sourcePath: config.databasePath,
-        targetDirectory: config.databaseBackupDirectory,
-        intervalMs: config.databaseBackupInterval,
-        databaseManager,
-        ...(config.databaseRetentionMs != null ? { dataRetentionMs: config.databaseRetentionMs } : {}),
-        ...(config.databaseBackupSingleFile ? { singleFileName: 'binance_backup.sqlite' } : {}),
-      })
-    : null;
-
   bindTradeCollectorEvents(tradeDataCollector);
   bindDataCollectorEvents(dataCollector);
+  bindLiquidationCollectorEvents(liquidationCollector);
 
   setupProcessHandlers({
     dataCollector,
     tradeDataCollector,
     aggTradeCollector,
-    backupScheduler,
+    liquidationCollector,
   });
 
   await tradeDataCollector.start();
+  await liquidationCollector.start();
   await dataCollector.start();
   await aggTradeCollector.start();
-  if (backupScheduler) {
-    backupScheduler.start();
-  }
 
   logger.info('Binance ingestion process is running');
 }
@@ -150,6 +146,35 @@ function buildTradeSubscriptions(
   return Array.from(deduped.values());
 }
 
+function buildLiquidationSubscriptions(
+  aggregators: CvdAggregatorConfig[]
+): Array<{ symbol: string; marketType: Extract<MarketType, 'USDT-M' | 'COIN-M'> }> {
+  const deduped = new Map<string, { symbol: string; marketType: Extract<MarketType, 'USDT-M' | 'COIN-M'> }>();
+
+  for (const aggregator of aggregators) {
+    for (const stream of aggregator.streams) {
+      if (stream.marketType !== 'USDT-M' && stream.marketType !== 'COIN-M') {
+        continue;
+      }
+
+      const symbol = stream.symbol.toUpperCase();
+      // 現状はBTC系の先物清算のみ追跡する
+      if (!symbol.includes('BTC')) {
+        continue;
+      }
+
+      const market = stream.marketType;
+      const key = `${market}:${symbol}`;
+
+      if (!deduped.has(key)) {
+        deduped.set(key, { symbol, marketType: market });
+      }
+    }
+  }
+
+  return Array.from(deduped.values());
+}
+
 function bindTradeCollectorEvents(tradeCollector: TradeDataCollector): void {
   tradeCollector.on('tradeDataSaved', (count: number) => {
     logger.debug(`Persisted ${count} Binance trades`);
@@ -161,6 +186,20 @@ function bindTradeCollectorEvents(tradeCollector: TradeDataCollector): void {
 
   tradeCollector.on('error', (error) => {
     logger.error('Binance trade collector error', error);
+  });
+}
+
+function bindLiquidationCollectorEvents(liquidationCollector: LiquidationDataCollector): void {
+  liquidationCollector.on('liquidationDataSaved', (count: number) => {
+    logger.debug(`Persisted ${count} Binance liquidations`);
+  });
+
+  liquidationCollector.on('websocketError', (error) => {
+    logger.error('Binance liquidation WebSocket error', error);
+  });
+
+  liquidationCollector.on('error', (error) => {
+    logger.error('Binance liquidation collector error', error);
   });
 }
 
@@ -178,16 +217,14 @@ function setupProcessHandlers(params: {
   dataCollector: DataCollector;
   tradeDataCollector: TradeDataCollector;
   aggTradeCollector: AggTradeCollector;
-  backupScheduler: DatabaseBackupScheduler | null;
+  liquidationCollector: LiquidationDataCollector;
 }): void {
-  const { dataCollector, tradeDataCollector, aggTradeCollector, backupScheduler } = params;
+  const { dataCollector, tradeDataCollector, aggTradeCollector, liquidationCollector } = params;
 
   const shutdown = async (signal: NodeJS.Signals) => {
     logger.info(`Received ${signal}, shutting down ingestion process...`);
-    if (backupScheduler) {
-      backupScheduler.stop();
-    }
     await aggTradeCollector.stop();
+    await liquidationCollector.stop();
     await tradeDataCollector.stopCollection();
     await dataCollector.stop();
     process.exit(0);

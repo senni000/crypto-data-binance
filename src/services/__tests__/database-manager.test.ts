@@ -1,8 +1,16 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import sqlite3 from 'sqlite3';
 import { DatabaseManager } from '../../services/database';
-import { AggTrade, OHLCVData, SymbolMetadata, TopTraderAccountData, TopTraderPositionData } from '../../types';
+import {
+  AggTrade,
+  LiquidationEvent,
+  OHLCVData,
+  SymbolMetadata,
+  TopTraderAccountData,
+  TopTraderPositionData,
+} from '../../types';
 
 const createTempPath = (): string => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'binance-db-'));
@@ -171,6 +179,64 @@ describe('DatabaseManager', () => {
     expect(checkpoint).toEqual({
       tradeId: 102,
       tradeTime: trades[1]!.tradeTime,
+    });
+  });
+
+  it('should persist liquidation events and ignore duplicates', async () => {
+    const now = Date.now();
+    const base: LiquidationEvent = {
+      eventId: 'USDT-M:liquidation-1',
+      symbol: 'BTCUSDT',
+      marketType: 'USDT-M',
+      side: 'sell',
+      orderType: 'MARKET',
+      timeInForce: 'GTC',
+      status: 'FILLED',
+      orderId: '123456',
+      price: 25_000,
+      averagePrice: 25_010,
+      lastFilledPrice: 25_000,
+      originalQuantity: 10,
+      filledQuantity: 10,
+      lastFilledQuantity: 10,
+      eventTime: now,
+      tradeTime: now,
+      isMaker: false,
+      reduceOnly: true,
+      createdAt: now,
+    };
+
+    await manager.saveLiquidationEvents([base]);
+    await manager.saveLiquidationEvents([
+      {
+        ...base,
+        price: 26_000,
+        createdAt: now + 1,
+      },
+    ]);
+
+    await new Promise<void>((resolve, reject) => {
+      const db = new sqlite3.Database(dbPath, (error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+
+        db.get(
+          'SELECT COUNT(*) as count, MAX(price) as max_price FROM liquidation_events',
+          (err, row: { count: number; max_price: number }) => {
+            db.close();
+            if (err) {
+              reject(err);
+              return;
+            }
+
+            expect(row.count).toBe(1);
+            expect(row.max_price).toBe(base.price);
+            resolve();
+          }
+        );
+      });
     });
   });
 });

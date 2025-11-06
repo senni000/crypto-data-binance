@@ -57,10 +57,12 @@ export class ConfigManager {
       restRequestTimeout: this.getNumberEnvVar('REST_REQUEST_TIMEOUT_MS', 10_000),
       symbolUpdateHourUtc: this.getNumberEnvVar('SYMBOL_UPDATE_HOUR_UTC', 1),
       aggTradeDataDirectory,
-      cvdZScoreThreshold: this.getNumberEnvVar('CVD_ZSCORE_THRESHOLD', 2.0),
+      cvdZScoreThreshold: this.getNumberEnvVar('CVD_ZSCORE_THRESHOLD', 2.5),
       cvdAggregators: this.resolveCvdAggregators(),
       tradeFlushIntervalMs: this.getNumberEnvVar('BINANCE_TRADE_FLUSH_INTERVAL_MS', 5_000),
       tradeMaxBufferSize: this.getNumberEnvVar('BINANCE_TRADE_MAX_BUFFER_SIZE', 1_000),
+      liquidationFlushIntervalMs: this.getNumberEnvVar('BINANCE_LIQUIDATION_FLUSH_INTERVAL_MS', 5_000),
+      liquidationMaxBufferSize: this.getNumberEnvVar('BINANCE_LIQUIDATION_MAX_BUFFER_SIZE', 500),
       cvdAggregationBatchSize: this.getNumberEnvVar('CVD_AGGREGATION_BATCH_SIZE', 500),
       cvdAggregationPollIntervalMs: this.getNumberEnvVar('CVD_AGGREGATION_POLL_INTERVAL_MS', 2_000),
       cvdAlertSuppressionMinutes: this.getNumberEnvVar('CVD_ALERT_SUPPRESSION_MINUTES', 30),
@@ -183,6 +185,14 @@ export class ConfigManager {
 
     if (config.tradeMaxBufferSize <= 0) {
       errors.push('BINANCE_TRADE_MAX_BUFFER_SIZE must be greater than 0');
+    }
+
+    if (config.liquidationFlushIntervalMs <= 0) {
+      errors.push('BINANCE_LIQUIDATION_FLUSH_INTERVAL_MS must be greater than 0');
+    }
+
+    if (config.liquidationMaxBufferSize <= 0) {
+      errors.push('BINANCE_LIQUIDATION_MAX_BUFFER_SIZE must be greater than 0');
     }
 
     if (config.cvdAggregationBatchSize <= 0) {
